@@ -1,0 +1,20 @@
+plugins { id 'java'; id 'net.minecraftforge.gradle' version '[6.0,6.2)' }
+version = '1.0.0-r18'
+group = 'dev.barryalen'
+base { archivesName = 'Touhou-Little-Maid-Sophisticated' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+minecraft { mappings channel: 'official', version: '1.20.1' }
+dependencies { minecraft 'net.minecraftforge:forge:1.20.1-47.4.0'
+    // 编译期依赖：精妙背包、精妙核心与车万女仆（只做类型检查，不会打进成品 jar）
+    compileOnly fileTree(dir: 'libs', include: ['sophisticatedcore*.jar', 'sophisticatedbackpacks*.jar', 'touhoulittlemaid.jar'])
+}
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+processResources {
+    def props = [mod_id: 'maid_sophisticated', mod_name: 'Touhou Little Maid: Sophisticated', mod_version: project.version,
+                 display_name: '车万女仆：这很精妙', mod_authors: 'BarryAlen777', mod_license: 'MIT',
+                 minecraft_version: '1.20.1', forge_version: '47.4.0']
+    inputs.properties props
+    filteringCharset = 'UTF-8'
+    filesMatching('META-INF/mods.toml') { expand props }
+}
+jar.finalizedBy('reobfJar')
