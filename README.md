@@ -3,6 +3,7 @@
 
 ## 📋 前置依赖
 **必须同时安装：**
+
 [车万女仆（Touhou Little Maid）](https://www.mcmod.cn/class/1796.html)
 
 [精妙背包（Sophisticated Backpacks）](https://www.mcmod.cn/class/3739.html)
