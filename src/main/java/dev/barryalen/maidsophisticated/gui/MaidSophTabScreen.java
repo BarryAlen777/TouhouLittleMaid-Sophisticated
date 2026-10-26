@@ -1,19 +1,29 @@
 package dev.barryalen.maidsophisticated.gui;
 
+import com.github.tartaricacid.touhoulittlemaid.client.gui.entity.cache.CacheIconManager;
+import com.github.tartaricacid.touhoulittlemaid.client.gui.sound.MaidSoundPackGui;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.MaidDownloadButton;
+import com.github.tartaricacid.touhoulittlemaid.client.resource.CustomPackLoader;
+import com.github.tartaricacid.touhoulittlemaid.compat.ysm.YsmCompat;
+import com.github.tartaricacid.touhoulittlemaid.compat.ysm.event.OpenYsmMaidScreenEvent;
+import com.github.tartaricacid.touhoulittlemaid.entity.ai.brain.MaidGomokuAI;
 import com.github.tartaricacid.touhoulittlemaid.entity.ai.brain.MaidSchedule;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.TabIndex;
 import com.github.tartaricacid.touhoulittlemaid.network.NetworkHandler;
 import com.github.tartaricacid.touhoulittlemaid.network.message.MaidConfigMessage;
 import com.github.tartaricacid.touhoulittlemaid.network.message.ToggleTabMessage;
+import com.github.tartaricacid.touhoulittlemaid.util.GuiTools;
+import com.github.tartaricacid.touhoulittlemaid.util.ParseI18n;
 import dev.barryalen.maidsophisticated.MaidBackpackData;
 import dev.barryalen.maidsophisticated.MaidSophisticated;
 import dev.barryalen.maidsophisticated.ModItems;
 import dev.barryalen.maidsophisticated.ModNetwork;
 import dev.barryalen.maidsophisticated.TlmCompat;
 import dev.barryalen.maidsophisticated.client.MaidSophTabButton;
+import dev.barryalen.maidsophisticated.client.SophBackpackRender;
 import net.minecraft.ChatFormatting;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
@@ -23,6 +33,7 @@ import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.LivingEntity;
@@ -30,6 +41,7 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
+import net.minecraftforge.common.MinecraftForge;
 
 import java.text.DecimalFormat;
 import java.util.ArrayList;
@@ -96,6 +108,8 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     private static final int BP_Y = MaidSophTabContainer.BP_Y;
 
     private boolean draggingScroll;
+    /** 头像左上角那个"!"：悬停时列出女仆的详细信息（和女仆首页同一个按钮同一个提示）。 */
+    private ImageButton infoButton;
     private EditBox searchBox;
     private boolean searchOpen;
     private String searchText = "";
@@ -141,8 +155,93 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
 
         // 左侧栏：与女仆首页同一套小部件
         if (maid instanceof EntityMaid entityMaid) {
+            addPreviewButtons(entityMaid);
             addLeftColumnWidgets(entityMaid);
         }
+    }
+
+    /**
+     * 头像框左上角那三个小按钮，和女仆首页一模一样（坐标、贴图、行为都照搬）：
+     * <ul>
+     *   <li>{@code !} 详细信息：不打开界面，鼠标停在上面就列出主人 / 模型名 / 经验 / 好感度 / 五子棋战绩；</li>
+     *   <li>音符 语音包：打开车万女仆自己的语音包选择界面；</li>
+     *   <li>化妆刷 更改皮肤：打开模型选择界面（装了 YSM 时多一个 YSM 皮肤按钮，位置也照搬）。</li>
+     * </ul>
+     * 坐标用的是女仆首页原位（贴图 u/v 也照搬），所以两边看起来是同一个界面。
+     */
+    private void addPreviewButtons(EntityMaid maid) {
+        this.infoButton = new ImageButton(leftPos + 8, topPos + 14, 9, 9, 72, 65, 10, BUTTON,
+                GuiTools.NO_ACTION);
+        this.addRenderableWidget(this.infoButton);
+
+        // 装了 YSM 时女仆首页会把语音包按钮往左挪一格，给 YSM 皮肤按钮腾位置
+        boolean ysm = YsmCompat.isInstalled();
+        int soundX = ysm ? 42 : 52;
+        ImageButton sound = new ImageButton(leftPos + soundX, topPos + 14, 9, 9, 144, 43, 10, BUTTON,
+                b -> Minecraft.getInstance().setScreen(new MaidSoundPackGui(maid)));
+        sound.setTooltip(Tooltip.create(Component.translatable("gui.touhou_little_maid.button.sound")));
+        this.addRenderableWidget(sound);
+
+        if (ysm) {
+            ImageButton ysmSkin = new ImageButton(leftPos + 52, topPos + 14, 9, 9, 144, 65, 10, BUTTON,
+                    b -> MinecraftForge.EVENT_BUS.post(new OpenYsmMaidScreenEvent(maid)));
+            ysmSkin.setTooltip(Tooltip.create(Component.translatable("gui.touhou_little_maid.button.ysm_skin")));
+            this.addRenderableWidget(ysmSkin);
+        }
+
+        ImageButton skin = new ImageButton(leftPos + 62, topPos + 14, 9, 9, 72, 43, 10, BUTTON,
+                b -> CacheIconManager.openMaidModelGui(maid));
+        skin.setTooltip(Tooltip.create(Component.translatable("gui.touhou_little_maid.button.skin")));
+        this.addRenderableWidget(skin);
+    }
+
+    /**
+     * "!" 按钮的悬停提示：内容和女仆首页那串完全一致（主人、模型名、经验、好感度、五子棋战绩），
+     * 文本全部用女仆模组自己的语言键，所以中文/英文都是现成的。
+     */
+    private void renderMaidInfoTooltip(GuiGraphics graphics, int mouseX, int mouseY) {
+        if (this.infoButton == null || !this.infoButton.isHoveredOrFocused()) {
+            return;
+        }
+        if (!(menu.getMaid() instanceof EntityMaid maid)) {
+            return;
+        }
+        List<Component> list = new ArrayList<>();
+        MutableComponent title = Component.literal("")
+                .append(Component.translatable("tooltips.touhou_little_maid.info.title")
+                        .withStyle(ChatFormatting.GOLD, ChatFormatting.UNDERLINE))
+                .append(Component.literal("\u00a7r "));
+        if (maid.isStruckByLightning()) {
+            title.append(Component.literal("\u2740").withStyle(ChatFormatting.DARK_RED));
+        }
+        if (maid.isInvisible()) {
+            title.append(Component.literal("\u271f").withStyle(ChatFormatting.BLUE));
+        }
+        list.add(title);
+
+        LivingEntity owner = maid.getOwner();
+        if (owner != null) {
+            list.add(infoLine("tooltips.touhou_little_maid.info.owner", owner.getName()));
+        }
+        CustomPackLoader.MAID_MODELS.getInfo(maid.getModelId()).ifPresent(info ->
+                list.add(infoLine("tooltips.touhou_little_maid.info.model_name",
+                        ParseI18n.parse(info.getName()))));
+        list.add(infoLine("tooltips.touhou_little_maid.info.experience",
+                Component.literal(String.valueOf(maid.getExperience()))));
+        list.add(infoLine("tooltips.touhou_little_maid.info.favorability",
+                Component.literal(String.valueOf(maid.getFavorability()))));
+        list.add(infoLine("block.touhou_little_maid.gomoku",
+                Component.translatable("tooltips.touhou_little_maid.info.game_skill.gomoku",
+                        maid.getGameRecordManager().getGomokuWinCount(), MaidGomokuAI.getRank(maid))));
+        graphics.renderTooltip(this.font, list, Optional.empty(), mouseX, mouseY);
+    }
+
+    /** 详情提示里的一行："█ 标题: 值"，和女仆首页同一个排版。 */
+    private static Component infoLine(String key, Component value) {
+        return Component.literal("\u00a7a\u2588 ")
+                .withStyle(ChatFormatting.WHITE)
+                .append(Component.translatable(key).append(": ").withStyle(ChatFormatting.AQUA))
+                .append(value);
     }
 
     /**
@@ -307,6 +406,7 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
             @Override
             public void onClick(double mouseX, double mouseY) {
                 this.isStateTriggered = !this.isStateTriggered;
+                setTooltip(modeTooltip(tooltipKey, this.isStateTriggered));
                 boolean home = mode == Mode.HOME ? this.isStateTriggered : maid.isHomeModeEnable();
                 boolean pick = mode == Mode.PICKUP ? this.isStateTriggered : maid.isPickup();
                 boolean ride = mode == Mode.RIDE ? this.isStateTriggered : maid.isRideable();
@@ -314,8 +414,18 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
             }
         };
         button.initTextureValues(u, 0, 21, 21, BUTTON);
-        button.setTooltip(Tooltip.create(Component.translatable(tooltipKey)));
+        button.setTooltip(modeTooltip(tooltipKey, initial));
         return button;
+    }
+
+    /**
+     * 模式开关的两行提示：第一行是"开了还是关了"，第二行是这功能的说明。
+     * 车万女仆语言文件里只有 key.true / key.false / key.desc 三个键，
+     * 直接挂裸 key 会显示成一串原始键名，必须按状态拼上后缀。
+     */
+    private static Tooltip modeTooltip(String key, boolean on) {
+        return Tooltip.create(Component.translatable(key + "." + (on ? "true" : "false"))
+                .append("\n").append(Component.translatable(key + ".desc")));
     }
 
     /** 日程按钮：与女仆首页 ScheduleButton 同款外观与行为。 */
@@ -392,7 +502,13 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
                 lines.add(Component.translatable("gui." + MaidSophisticated.MOD_ID + ".main_backpack.set_main")
                         .withStyle(ChatFormatting.GRAY));
             }
+            lines.add(Component.translatable("gui." + MaidSophisticated.MOD_ID + ".main_backpack.shift_take")
+                    .withStyle(ChatFormatting.DARK_GRAY));
             graphics.renderTooltip(this.font, lines, Optional.empty(), mouseX, mouseY);
+            return;
+        }
+        if (this.infoButton != null && this.infoButton.isHoveredOrFocused()) {
+            renderMaidInfoTooltip(graphics, mouseX, mouseY);
             return;
         }
         super.renderTooltip(graphics, mouseX, mouseY);
@@ -404,8 +520,19 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
 
         LivingEntity maid = menu.getMaid();
         if (maid != null) {
-            InventoryScreen.renderEntityInInventoryFollowsMouse(graphics, leftPos + 40, topPos + 100, 40,
-                    (leftPos + 40) - mouseX, (topPos + 50) - mouseY, maid);
+            // 这一次预览要用的批次显式递进去当兜底：正常情况由实体渲染前后的
+            // RenderLivingEvent 接住 graphics.bufferSource()（见 MaidBackpackRenderer），
+            // 这里再压一层，保证即使某个自定义模型走的路子绕开了事件，背包顶点也进同一个队列，
+            // 跟着这次预览一起 flush，不会晚一帧、也不会闪。
+            boolean pushed = SophBackpackRender.pushBuffers(graphics.bufferSource());
+            try {
+                InventoryScreen.renderEntityInInventoryFollowsMouse(graphics, leftPos + 40, topPos + 100, 40,
+                        (leftPos + 40) - mouseX, (topPos + 50) - mouseY, maid);
+            } finally {
+                if (pushed) {
+                    SophBackpackRender.popBuffers();
+                }
+            }
         }
         if (maid instanceof EntityMaid entityMaid) {
             drawLeftColumnInfo(graphics, entityMaid);
@@ -609,8 +736,14 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
             this.setFocused(null);
         }
         Slot hovered = this.getSlotUnderMouse();
-        if (hovered instanceof MaidSophTabContainer.MaidBackpackSlot bpSlot && bpSlot.hasItem()) {
+        if (button == 0 && !hasShiftDown() && this.menu.getCarried().isEmpty()
+                && hovered instanceof MaidSophTabContainer.MaidBackpackSlot bpSlot && bpSlot.hasItem()) {
+            // 空手左键点背包槽 = 选她背上要显示的主背包。
+            // 这里必须直接 return，不能再让原版把背包"拿起来"：客户端拿起物品会立刻清空这一格，
+            // 而"选中"包和"点击槽位"包是两条路，服务端收到选中包时这一格可能已经空了，
+            // 于是选中被拒绝，背上还画着上一次的主背包（"选了钻石却显示铁制"就是这么来的）。
             menu.clientSelect(bpSlot.getSlotIndex());
+            return true;
         }
         return super.mouseClicked(mouseX, mouseY, button);
     }

@@ -25,10 +25,10 @@ import net.minecraftforge.registries.RegistryObject;
  * 与车万女仆的全部耦合都集中在这个类。
  * 只有在确认 touhou_little_maid 已安装时才会被类加载。
  *
- * 这里只做"读"和"用"女仆自己的东西，绝不再改写她的背包类型：
- * 上一版把精妙背包冒充成女仆的"背包类型"，等于把女仆自己的背包挤掉，
- * 两种背包因此不能同时装。现在女仆的背包归车万女仆管，
- * 精妙背包的外观完全由 {@code client.MaidBackpackRenderer} 自己画。
+ * 这里只做"读"和"用"女仆自己的东西，绝不在服务端改写她的背包类型：
+ * 精妙背包的外观是在客户端渲染那一刻临时把"背包类型"换成我们注册的档位，
+ * 让车万女仆自己的背包层去画（站、坐、躺、骑乘、模型缩放全都天生正确），
+ * 画完立刻换回去，所以她自己的背包、容量和存档一点没动。
  */
 public final class TlmCompat {
     private TlmCompat() {}
@@ -108,6 +108,43 @@ public final class TlmCompat {
     /** 女仆自身物品栏里"额外背包格"的起点（0~5 是装备/手持/展示格，往后的才是背包容量）。 */
     public static int maidStorageStart() {
         return BackpackManager.getEmptyBackpack().getAvailableMaxContainerIndex();
+    }
+
+    /**
+     * 车万女仆自己的"这个物品女仆能不能捡"规则（配置里的拾取黑名单、不可堆叠物品等）。
+     * 我们替她捡东西或往精妙背包里塞之前必须问一下，不然服务端配置的黑名单就形同虚设。
+     */
+    public static boolean canMaidPickupItem(ItemStack stack) {
+        return EntityMaid.canInsertItem(stack);
+    }
+
+    /** 坐着的女仆在休息，不该隔着两格把地上的东西吸走（她自己的拾取 AI 也不会这么做）。 */
+    public static boolean isSitting(LivingEntity entity) {
+        return entity instanceof EntityMaid maid && maid.isMaidInSittingPose();
+    }
+
+    /** 用女仆模组自己的、带节流的拾取音效，替她捡东西时听感和原版一致。 */
+    public static void playPickupSound(LivingEntity entity) {
+        if (entity instanceof EntityMaid maid) {
+            maid.tryPlayMaidPickupSound();
+        }
+    }
+
+    /**
+     * 我们替女仆完成了拾取，就补发女仆模组的"拾取完成"事件。
+     * 正常拾取这条事件由命中精妙背包的那次 pickupItem 内部发出；我们取消了那次调用，
+     * 不补发的话 KubeJS 脚本、任务/成就类模组就永远收不到"女仆捡到东西"。
+     */
+    public static void postPickupResult(LivingEntity entity, ItemStack stack, int count) {
+        if (count <= 0 || !(entity instanceof EntityMaid maid) || stack.isEmpty()) {
+            return;
+        }
+        // 必须是带着完整 NBT 的副本，不能 new ItemStack(item, count)：
+        // 那样会把附魔、自定义名、容器内容全丢掉，依赖这条事件的模组拿到的是"同名白板物品"。
+        ItemStack payload = stack.copy();
+        payload.setCount(count);
+        net.minecraftforge.common.MinecraftForge.EVENT_BUS.post(
+                new com.github.tartaricacid.touhoulittlemaid.api.event.MaidPickupEvent.ItemResultPost(maid, payload));
     }
 
     /** 女仆自己物品栏的可用格数（没背包时只有 6 格装备位）。 */

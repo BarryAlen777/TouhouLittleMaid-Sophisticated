@@ -1,13 +1,8 @@
 package dev.barryalen.maidsophisticated.client;
 
-import com.github.tartaricacid.touhoulittlemaid.api.backpack.IMaidBackpack;
 import com.github.tartaricacid.touhoulittlemaid.api.entity.IMaid;
 import com.github.tartaricacid.touhoulittlemaid.api.event.client.RenderMaidEvent;
-import com.github.tartaricacid.touhoulittlemaid.client.renderer.entity.EntityMaidRenderer;
-import com.github.tartaricacid.touhoulittlemaid.client.resource.pojo.MaidModelInfo;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
-import com.mojang.blaze3d.vertex.PoseStack;
-import com.mojang.math.Axis;
 import dev.barryalen.maidsophisticated.MaidBackpackData;
 import dev.barryalen.maidsophisticated.MaidBackpackLook;
 import dev.barryalen.maidsophisticated.MaidBackpackView;
@@ -17,17 +12,14 @@ import dev.barryalen.maidsophisticated.TlmCompat;
 import dev.barryalen.maidsophisticated.backpack.SophMaidBackpack;
 import net.minecraft.Util;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.renderer.entity.LivingEntityRenderer;
-import net.minecraft.client.renderer.texture.OverlayTexture;
-import net.minecraft.util.Mth;
-import net.minecraft.world.entity.Pose;
+import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.client.event.RenderLivingEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.p3pp3rf1y.sophisticatedbackpacks.client.ClientEventHandler;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -35,156 +27,98 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 女仆背上的精妙背包外观。
+ * 女仆背上的精妙背包外观——方案 A：全部交给车万女仆自己的背包层来画。
  *
- * 画法和玩家背上完全一样：直接拿"精妙背包这个物品"的物品模型，
- * 用精妙背包自己的 WORN 姿势贴到女仆后背，所以等级颜色、前袋、侧袋、电池、水罐
- * 这些升级外观都和玩家身上的分毫不差（这是第 9 轮验证过、看起来最对的那一套）。
+ * <p>车万女仆背上那个背包只由她自己的两条渲染层决定（普通人形走 {@code LayerMaidBackpack}，
+ * 骨骼模型走 {@code GeckoLayerMaidBackpack}），而这两层只认
+ * {@code maid.getMaidBackpackType()} 这个注册类型。它们已经处理好了站、坐、躺、骑乘、
+ * 走路前倾、模型整体缩放、自定义模型自带的背包定位骨骼——所以最稳的做法不是自己拿物品模型
+ * 去贴坐标（那样姿势和位置全得靠猜，前面几版就是这么翻车的），而是：
+ * <b>渲染前把"她的背包类型"临时换成我们注册的六档之一，让她自己的层去画。</b></p>
  *
- * 两个环节：
- * 1. {@link RenderMaidEvent}：女仆渲染器开始画之前，决定"这一帧背上该显示哪一个"，
- *    要显示精妙背包时，把女仆模组自己的"显示背包"开关临时关掉，她的蓝色背包就不画了；
- * 2. {@link RenderLivingEvent.Pre}：拿到现成的 PoseStack / MultiBufferSource / 光照，
- *    把精妙背包物品模型画在后背上。同一帧结束时在 Post 里把开关还原。
+ * <p>我们注册的六档（{@link SophMaidBackpack}）共用同一个"模型"：{@code MaidBackpackItemModel}，
+ * 它不画任何方块几何，只在这一帧的挂点姿势上调用物品渲染器画精妙背包自己的物品模型——
+ * 位置和姿势全部来自车万女仆的背包层，所以站、坐、躺、骑乘、缩放都跟着女仆模型走，
+ * 外观和玩家背上的精妙背包完全一致（连升级部件的贴花都一致）。
+ * 代价是要在渲染那一刻借道她的"背包类型"，帧末立刻还原。</p>
  *
- * 数据来源优先用 {@link MaidBackpackView}（网络包写进来的纯客户端缓存），
- * 拿不到才退回实体 capability——这样同步包来早来晚都不会让外观变成空的。
+ * <p>只在客户端内存里换类型，帧末立刻换回去；服务端数据、她自己的存档、
+ * 背包容量和物品栏一点没动，两种背包可以同时装。</p>
  */
 @OnlyIn(Dist.CLIENT)
 public final class MaidBackpackRenderer {
-    /** 背包挂在身高百分之多少的位置（大约后背中上方）。 */
-    private static final double BACK_HEIGHT_RATIO = 0.52D;
-    /** 背包离身体中线往后多少格（按 1.4 格高的女仆算）。 */
-    private static final double BACK_DEPTH = 0.27D;
-    /** 背包缩放（按 1.4 格高的女仆算），比玩家略小一点。 */
-    private static final float BACK_SCALE = 0.78F;
-    private static final float BASE_HEIGHT = 1.4F;
-
-    /** 这一帧被临时关掉"显示背包"的女仆 → 她原本的开关值，Post / 帧末还原。 */
-    private static final Map<Integer, Boolean> HIDDEN = new HashMap<>();
-    /** 这一帧改用了"换背包类型"方式的女仆（骨骼模型 / YSM 模型），Pre 里别重复画。 */
+    /** 这一帧已经换过背包类型的女仆，帧末统一还原。 */
     private static final Set<Integer> SWAPPED = new HashSet<>();
     /** 客户端主动要状态包的节流（每只女仆最快 2 秒一次）。 */
     private static final Map<Integer, Long> LAST_REQUEST = new HashMap<>();
-    /** 只打一次诊断日志，方便出问题时从 latest.log 一眼看出卡在哪一步。 */
+    /** 只打一次诊断日志。 */
     private static boolean loggedDecision;
+    /** TLM 当前正在画的女仆；背包物品模型用它来取 ItemStack。 */
+    private static EntityMaid CURRENT_MAID;
 
     private MaidBackpackRenderer() {}
 
-    // ---------- 骨骼 / YSM 模型：退回车万女仆自己的背包类型管线 ----------
+    public static EntityMaid currentMaid() {
+        return CURRENT_MAID;
+    }
 
-    /**
-     * 只有骨骼模型（gecko）和 YSM 模型才用这条路：它们的渲染器绕过原版
-     * {@code LivingEntityRenderer}，{@code RenderLivingEvent} 根本不会触发，
-     * 所以只能像以前那样，在渲染前把她的背包类型临时换成精妙背包的某一档。
-     * 人形模型完全不碰这里，避免和下面的自绘重复。
-     */
     @SubscribeEvent
     public static void onRenderMaid(RenderMaidEvent event) {
         EntityMaid maid = asMaid(event.getMaid());
-        if (maid == null || !maid.level().isClientSide) {
+        if (maid == null) {
             return;
         }
-        if (!MaidSophisticated.sophisticatedBackpacksLoaded() || !playerWantsBackpack(maid)) {
-            return;
-        }
-        if (usesLivingEventPath(maid)) {
-            // 人形模型：交给 RenderLivingEvent 自己画，这里什么都不用做
-            return;
-        }
-        ItemStack top = topBackpack(maid);
-        if (top.isEmpty() || !shouldShowSophisticated(maid) || !maid.getConfigManager().isShowBackpack()) {
-            return;
-        }
-        IMaidBackpack current = maid.getMaidBackpackType();
-        if (!SophMaidBackpack.isSophType(current)) {
-            MaidBackpackLook.record(maid, current);
-        }
-        maid.setMaidBackpackType(SophMaidBackpack.forStack(top));
-        SWAPPED.add(maid.getId());
-        if (!loggedDecision) {
-            loggedDecision = true;
-            MaidSophisticated.LOGGER.info(
-                    "Maid backpack appearance -> sophisticated (bedrock model, gecko/ysm maid): {} on maid {}",
-                    top.getItem(), maid.getId());
-        }
+        CURRENT_MAID = maid;
+        applyTo(maid);
     }
 
-    // ---------- 人形模型：遮掉她自己的背包，再把精妙背包画上去 ----------
-
+    /**
+     * GUI 预览只补上下文/换类型，不自己画背包；同时把"这一次渲染用的批次"压进栈里。
+     *
+     * <p>Forge 在 {@code LivingEntityRenderer.render} 的最开头抛 Pre、最末尾抛 Post，
+     * 背包层（我们画精妙背包物品的地方）正好落在这两者之间，而事件里带的
+     * {@code MultiBufferSource} 就是调用方那一份：世界里是全局实体批次，
+     * 界面 3D 预览（车万女仆主界面、我们的页签、模型详情、tooltip 等，
+     * 原版都走 {@code InventoryScreen.renderEntityInInventory}）是界面自己的
+     * {@code GuiGraphics.bufferSource()}，画完由调用方统一 flush。
+     * 所以接住事件给的批次就能跟女仆身体同进同出。</p>
+     *
+     * <p>车万女仆的 Gecko/YSM 分支也走这条路：它的渲染器在 Pre 里面再发起一次渲染，
+     * 但把收到的 {@code bufferSource} 原样传给了每一个 layer（包括背包层），
+     * 所以这里压的这份就是层真正用的那份，不需要反射它的内部字段。</p>
+     */
     @SubscribeEvent
     public static void onRenderLivingPre(RenderLivingEvent.Pre<?, ?> event) {
-        if (!(event.getEntity() instanceof EntityMaid maid)) {
-            return;
+        if (event.getEntity() instanceof EntityMaid maid) {
+            CURRENT_MAID = maid;
+            applyTo(maid);
+            SophBackpackRender.pushBuffers(event.getMultiBufferSource());
         }
-        // 这一帧已经用"换类型"方式显示了，别再画第二遍
-        if (SWAPPED.contains(maid.getId())) {
-            return;
-        }
-        if (!MaidSophisticated.sophisticatedBackpacksLoaded() || maid.isInvisible()
-                || !playerWantsBackpack(maid)) {
-            return;
-        }
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.level == null) {
-            return;
-        }
-
-        ItemStack stack = topBackpack(maid);
-        if (stack.isEmpty()) {
-            // 数据没到：顺手请服务端补发一次（节流），并保证不遮住她自己的背包
-            requestState(maid);
-            return;
-        }
-        if (!shouldShowSophisticated(maid)) {
-            return;
-        }
-        // 遮住女仆模组自己那条背包层。这一步和"画精妙背包"放在同一个钩子里：
-        // 只有确实要画的时候才遮，绝不会出现"遮了却没画"导致背上空空的情况。
-        hideOwnBackpack(maid);
-        if (!loggedDecision) {
-            loggedDecision = true;
-            MaidSophisticated.LOGGER.info(
-                    "Maid backpack appearance -> sophisticated (item model): {} on maid {}",
-                    stack.getItem(), maid.getId());
-        }
-
-        // 站姿高度 × 模型缩放 = 女仆在画面里大概有多高，背包按这个比例挂。
-        float height = Math.max(0.6F,
-                maid.getDimensions(Pose.STANDING).height * modelScale(event.getRenderer(), maid));
-        float fit = Mth.clamp(height / BASE_HEIGHT, 0.62F, 1.25F);
-        float yaw = Mth.rotLerp(event.getPartialTick(), maid.yBodyRotO, maid.yBodyRot);
-
-        PoseStack pose = event.getPoseStack();
-        pose.pushPose();
-        // 先站到后背高度，再按身体朝向转过去（0 度时实体面朝 +Z，背面是 -Z）。
-        pose.translate(0.0D, height * BACK_HEIGHT_RATIO, 0.0D);
-        pose.mulPose(Axis.YP.rotationDegrees(-yaw));
-        pose.translate(0.0D, 0.0D, -BACK_DEPTH * fit);
-        pose.scale(BACK_SCALE * fit, BACK_SCALE * fit, BACK_SCALE * fit);
-
-        mc.getItemRenderer().renderStatic(stack, ClientEventHandler.WORN, event.getPackedLight(),
-                OverlayTexture.NO_OVERLAY, pose, event.getMultiBufferSource(), mc.level, maid.getId());
-        pose.popPose();
     }
 
     @SubscribeEvent
     public static void onRenderLivingPost(RenderLivingEvent.Post<?, ?> event) {
-        if (event.getEntity() instanceof EntityMaid maid) {
-            unhide(maid);
+        if (event.getEntity() instanceof EntityMaid) {
+            // 只弹自己压的那一层：嵌套渲染（层里再画一个实体）内层先弹回外层，
+            // 外层的批次不会在这里被提前清掉。
+            SophBackpackRender.popBuffers();
+            if (CURRENT_MAID != null && CURRENT_MAID == event.getEntity()) {
+                CURRENT_MAID = null;
+            }
         }
     }
 
-    /** 一帧结束（世界 + 界面都画完了）：把所有临时改过的东西全部还原。 */
+    /** 帧首兜底换好、帧末（世界 + 界面都画完）全部还原。 */
     @SubscribeEvent
     public static void onRenderTick(TickEvent.RenderTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
+        if (event.phase == TickEvent.Phase.START) {
+            applyForWholeFrame();
+        } else {
+            restoreAll();
         }
-        restoreAll();
     }
 
-    /** 退出世界 / 切维度：临时开关、主动请求节流都按实体 id 存着，必须清掉，免得串到下一个世界。 */
+    /** 退出世界 / 切维度：临时状态按实体 id 存着，必须清掉，免得串到下一个世界。 */
     @SubscribeEvent
     public static void onLevelUnload(net.minecraftforge.event.level.LevelEvent.Unload event) {
         if (event.getLevel().isClientSide()) {
@@ -192,19 +126,74 @@ public final class MaidBackpackRenderer {
         }
     }
 
-    // ---------- 状态判定 ----------
+    /** 女仆离场就把她的"补发状态包"节流记录丢掉：长局里这张表只进不出的小毛病顺手修掉。 */
+    @SubscribeEvent
+    public static void onEntityLeave(net.minecraftforge.event.entity.EntityLeaveLevelEvent event) {
+        if (event.getLevel().isClientSide()) {
+            LAST_REQUEST.remove(event.getEntity().getId());
+        }
+    }
+
+    // ---------- 换类型 ----------
+
+    /** 把某只女仆这一帧的背包类型换成精妙背包（该不该换、换成哪一档都在这里判）。 */
+    private static void applyTo(EntityMaid maid) {
+        if (!maid.level().isClientSide || !MaidSophisticated.sophisticatedBackpacksLoaded()) {
+            return;
+        }
+        // 玩家在女仆设置里关掉了"显示背包"：她自己的层不会画，我们也不该塞一个进去
+        if (!maid.getConfigManager().isShowBackpack() || maid.isInvisible()) {
+            return;
+        }
+        if (SophMaidBackpack.isSophType(maid.getMaidBackpackType())) {
+            // 已经换过了（渲染事件 + 帧首兜底会各来一次）
+            return;
+        }
+
+        ItemStack top = topBackpack(maid);
+        if (top.isEmpty()) {
+            // 数据没到：请服务端补发一次（节流），这一帧保持她原本的样子
+            requestState(maid);
+            return;
+        }
+        if (!shouldShowSophisticated(maid)) {
+            // 她自己的背包优先（面板里"主背包显示"选了女仆背包）
+            return;
+        }
+
+        // 记下她真正的类型，别的地方（界面按钮等）还要问
+        MaidBackpackLook.record(maid, maid.getMaidBackpackType());
+        maid.setMaidBackpackType(SophMaidBackpack.forStack(top));
+        SWAPPED.add(maid.getId());
+
+        if (!loggedDecision) {
+            loggedDecision = true;
+            MaidSophisticated.LOGGER.info(
+                    "Maid backpack appearance -> sophisticated: {} on maid {}",
+                    top.getItem(), maid.getId());
+        }
+    }
 
     /**
-     * 玩家自己有没有在女仆设置里关掉"显示背包"。
+     * 帧首兜底：把世界里所有该显示精妙背包的女仆先换好。
      *
-     * 注意不能直接读 {@code isShowBackpack()}：为了遮住女仆自带的背包，
-     * 我们每一帧都会把它临时设成 false，直接读就会误判成"玩家关了背包"，
-     * 于是精妙背包也跟着不画了。所以临时遮掉期间要看记下来的原值。
+     * <p>正常情况下 {@link #onRenderMaid} 已经够用；这里保留是因为背包数据可能晚一帧才到，
+     * 帧首先扫一遍能让"背包刚装上"那一帧就显示出来。</p>
      */
-    private static boolean playerWantsBackpack(EntityMaid maid) {
-        Boolean original = HIDDEN.get(maid.getId());
-        return original != null ? original : maid.getConfigManager().isShowBackpack();
+    private static void applyForWholeFrame() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null || !MaidSophisticated.sophisticatedBackpacksLoaded()) {
+            return;
+        }
+        ClientLevel level = mc.level;
+        for (Entity entity : level.entitiesForRendering()) {
+            if (entity instanceof EntityMaid maid) {
+                applyTo(maid);
+            }
+        }
     }
+
+    // ---------- 状态判定 ----------
 
     /**
      * 背上该不该显示精妙背包：
@@ -235,6 +224,19 @@ public final class MaidBackpackRenderer {
         return MaidBackpackData.of(maid).map(MaidBackpackData::topBackpack).orElse(ItemStack.EMPTY);
     }
 
+    public static ItemStack backpackToShow(EntityMaid maid) {
+        if (maid == null || !maid.level().isClientSide
+                || !MaidSophisticated.sophisticatedBackpacksLoaded()
+                || maid.isInvisible() || !maid.getConfigManager().isShowBackpack()) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack top = topBackpack(maid);
+        if (top.isEmpty() || !shouldShowSophisticated(maid)) {
+            return ItemStack.EMPTY;
+        }
+        return top;
+    }
+
     /** 客户端还没拿到这只女仆的背包状态时，主动请服务端补一份（每只女仆最快 2 秒一次）。 */
     private static void requestState(EntityMaid maid) {
         if (MaidBackpackView.get(maid.getId()) != null) {
@@ -249,78 +251,13 @@ public final class MaidBackpackRenderer {
         ModNetwork.sendRequestMaidState(maid.getId());
     }
 
-    /**
-     * 这一帧能不能走 {@link RenderLivingEvent} 自己画。
-     * 普通人形（bedrock）模型走的是原版 LivingEntityRenderer，事件一定会触发；
-     * 骨骼（gecko）模型和 YSM 模型会绕过它，那种情况只能用"换背包类型"的老办法。
-     */
-    private static boolean usesLivingEventPath(EntityMaid maid) {
-        try {
-            if (maid.isYsmModel()) {
-                return false;
-            }
-            var renderer = Minecraft.getInstance().getEntityRenderDispatcher().getRenderer(maid);
-            if (renderer instanceof EntityMaidRenderer maidRenderer) {
-                MaidModelInfo info = maidRenderer.getMainInfo();
-                return info == null || !info.isGeckoModel();
-            }
-        } catch (Throwable ignored) {
-            // 模型信息还没准备好：按人形模型处理，最坏也只是这一帧位置差一点
-            return true;
-        }
-        // 认不出的渲染器：不敢遮她的背包（遮了也未必画得出来），交给换类型那条路
-        return false;
-    }
+    // ---------- 还原 ----------
 
-    /** 女仆自定义模型自带的渲染缩放（有些模型整体放大/缩小过），拿不到就按 1 算。 */
-    private static float modelScale(LivingEntityRenderer<?, ?> renderer, EntityMaid maid) {
-        try {
-            if (renderer instanceof EntityMaidRenderer maidRenderer) {
-                MaidModelInfo info = maidRenderer.getMainInfo();
-                if (info != null) {
-                    return info.getRenderEntityScale();
-                }
-            }
-        } catch (Throwable ignored) {
-            // 模型信息还没准备好时按原尺寸画，绝不能因为外观把女仆渲染搞崩
-        }
-        return 1.0F;
-    }
-
-    // ---------- 遮住 / 还原女仆自己的背包 ----------
-
-    /**
-     * 把女仆模组自己那条背包层临时关掉：两条渲染层（普通人形、骨骼）都会先看这个开关。
-     * 只改客户端内存里的同步字段，服务端和存档里她的背包一动不动。
-     */
-    private static void hideOwnBackpack(EntityMaid maid) {
-        int id = maid.getId();
-        if (!HIDDEN.containsKey(id)) {
-            HIDDEN.put(id, maid.getConfigManager().isShowBackpack());
-        }
-        if (maid.getConfigManager().isShowBackpack()) {
-            maid.getConfigManager().setShowBackpack(false);
-        }
-    }
-
-    private static void unhide(EntityMaid maid) {
-        Boolean previous = HIDDEN.remove(maid.getId());
-        if (previous != null) {
-            maid.getConfigManager().setShowBackpack(previous);
-        }
-    }
-
-    /** 帧末兜底：万一某一帧因为异常没走到 Post，这里把开关和背包类型都补回去。 */
+    /** 帧末兜底：万一某一帧因为异常没走到还原，这里把背包类型补回去。 */
     private static void restoreAll() {
-        if (!HIDDEN.isEmpty()) {
-            for (Integer id : HIDDEN.keySet().toArray(new Integer[0])) {
-                Boolean previous = HIDDEN.remove(id);
-                EntityMaid maid = findMaid(id);
-                if (maid != null && previous != null) {
-                    maid.getConfigManager().setShowBackpack(previous);
-                }
-            }
-        }
+        CURRENT_MAID = null;
+        // 渲染被别的模组在 Pre 之后取消时 Post 不会来，这里兜底把批次栈清干净
+        SophBackpackRender.clearBuffers();
         if (!SWAPPED.isEmpty()) {
             for (Integer id : SWAPPED.toArray(new Integer[0])) {
                 EntityMaid maid = findMaid(id);
@@ -330,6 +267,7 @@ public final class MaidBackpackRenderer {
             }
             SWAPPED.clear();
         }
+        // 有些路径（比如实体忽然被卸载）没机会走到上面的循环，这里再扫一遍
         MaidBackpackLook.restoreAll();
     }
 
@@ -350,16 +288,9 @@ public final class MaidBackpackRenderer {
 
     /** 世界卸载 / 切维度时清干净，别把上一局的 id 带进来。 */
     public static void reset() {
-        HIDDEN.clear();
         SWAPPED.clear();
         LAST_REQUEST.clear();
+        CURRENT_MAID = null;
         MaidBackpackLook.restoreAll();
-    }
-
-    /** 女仆离开世界时清掉她的记录（{@code Events} 那边调用）。 */
-    public static void forget(int entityId) {
-        HIDDEN.remove(entityId);
-        SWAPPED.remove(entityId);
-        LAST_REQUEST.remove(entityId);
     }
 }

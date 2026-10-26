@@ -86,6 +86,24 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
     private String search = "";
     /** 上一帧内容指纹：背包被升级、漏斗、拾取这类外部途径改动时，靠它发现并重推整屏。 */
     private int lastContentHash;
+    /**
+     * 搜索 / 整理的服务端节流：一次整理是整个背包 O(n²) 并逐格写回，
+     * 连点或改过的客户端能把这条路径打成高频消耗。同一窗口两次重活之间
+     * 至少隔 4 tick（约 200ms），搜索至少隔 2 tick（约 100ms）。
+     *
+     * 被节流挡掉的需求不丢弃：各记一条"最新的一次"（pendingSearch / pendingSort），
+     * 冷却窗口一过就在 broadcastChanges 里补做。挡掉一次搜索比省下的开销贵得多——
+     * 尤其"关掉搜索"发的空串被吞后，服务端会永远停在过滤状态（内容指纹没变就不会重推）。
+     */
+    private static final long SORT_COOLDOWN_TICKS = 4L;
+    private static final long SEARCH_COOLDOWN_TICKS = 2L;
+    private long lastSortTick = Long.MIN_VALUE / 4;
+    private long lastSearchTick = Long.MIN_VALUE / 4;
+    /** 冷却窗口内收到的搜索词：合并语义，只留最新一条，等窗口过期补发。 */
+    @Nullable
+    private String pendingSearch;
+    /** 冷却窗口内收到过、还没落地的整理请求（方式本身已经记进 sortMode）。 */
+    private boolean pendingSort;
 
     public MaidSophTabContainer(int windowId, Inventory inventory, FriendlyByteBuf buf) {
         this(windowId, inventory, buf.readInt());
@@ -250,18 +268,41 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
                 || key.getPath().toLowerCase(Locale.ROOT).contains(search.replace(' ', '_'));
     }
 
-    /** 服务端：设置搜索词并重推这一屏。 */
+    /**
+     * 服务端：设置搜索词并重推这一屏。
+     *
+     * 带 100ms 节流（防连点 / 高频改词打满全包扫描），但节流窗口内的请求不是丢掉而是记账：
+     * 只留最新一条（更早的那几条本来就被这一条覆盖了），窗口一过由 broadcastChanges 补做。
+     * 最容易出事的是"关掉搜索"——客户端清输入框后发的是一条空串，这条一旦被吞，
+     * 界面就停在过滤状态，而且服务端的内容刷新靠"内容指纹变了才重推"，永远不自愈。
+     */
     public void serverSearch(String text) {
-        if (data == null) {
+        if (data == null || maid == null) {
             return;
         }
         String cleaned = text == null ? "" : text.trim().toLowerCase(Locale.ROOT);
         if (cleaned.length() > MAX_SEARCH) {
             cleaned = cleaned.substring(0, MAX_SEARCH);
         }
+        // 新请求总把旧的待补发值作废（"只留最新一条"），不然会出现：
+        // 窗口内攒了一条旧词 → 窗口一过新词直接落地 → 旧 pending 又晚一 tick 把新词顶回去
+        pendingSearch = null;
+        long now = maid.level().getGameTime();
+        if (now - lastSearchTick < SEARCH_COOLDOWN_TICKS) {
+            if (!cleaned.equals(search)) {
+                pendingSearch = cleaned;
+            }
+            return;
+        }
+        applySearch(cleaned, now);
+    }
+
+    /** 真正落地搜索词：和旧行为一致——记冷却时间、清滚动位、整屏重推。 */
+    private void applySearch(String cleaned, long now) {
         if (cleaned.equals(search)) {
             return;
         }
+        lastSearchTick = now;
         search = cleaned;
         scroll.set(0);
         sendContentToViewer();
@@ -269,13 +310,27 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
 
     // ---------- 整理 / 排序 ----------
 
-    /** 服务端：换排序方式并立刻整理一次。 */
+    /**
+     * 服务端：换排序方式并立刻整理一次。
+     *
+     * 整理本身有 200ms 节流（防连点把 O(n²) 的合并写成刷屏消耗），
+     * 但排序方式照常立刻记下：被节流掉的那次点不会重排，只记一条"待整理"，
+     * 冷却窗口一过由 broadcastChanges 按"当时最新的方式"补做一次——
+     * 不然连点后最后选中的方式图标和包内实际顺序会对不上，而且永远不会自愈。
+     */
     public void serverSort(int mode) {
-        if (data == null) {
+        if (data == null || maid == null) {
             return;
         }
         int count = SortMode.values().length;
         sortMode.set(Math.floorMod(mode, count));
+        long now = maid.level().getGameTime();
+        if (now - lastSortTick < SORT_COOLDOWN_TICKS) {
+            pendingSort = true;
+            return;
+        }
+        lastSortTick = now;
+        pendingSort = false;
         sortCurrentBackpack(sortMode());
         sendContentToViewer();
     }
@@ -411,16 +466,30 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
      * 选中后立刻同步给所有看得见她的客户端，背上的外观当场就换。
      */
     public void serverSelect(int index) {
-        if (index >= 0 && index < MaidBackpackData.SLOTS && data != null && !data.getStackInSlot(index).isEmpty()) {
-            selected.set(index);
-            scroll.set(Math.min(scroll.get(), maxScrollRow()));
-            data.setMainSlot(index);
-            sendContentToViewer();
+        // 只校验下标：点击已经不会把物品拿走了，再要求"格子当时非空"，
+        // 赶上"shift 取下包 → 立刻点回原格""别的玩家同时把包拿走"这类时序，玩家的选择就被白白丢掉。
+        // 选到空格也不慌：显示层 broadcastChanges 会临时纠偏，等包装回原格再自动切回去。
+        if (index < 0 || index >= MaidBackpackData.SLOTS || data == null) {
+            return;
         }
+        if (selected.get() == index && data.rawMainSlot() == index) {
+            // 重复点同一个已生效的背包槽：整屏内容没变，不重推
+            // （既省包，也堵住改过的客户端用几字节的选择包换 40 格物品包的上行放大）
+            return;
+        }
+        selected.set(index);
+        scroll.set(Math.min(scroll.get(), maxScrollRow()));
+        data.setMainSlot(index);
+        sendContentToViewer();
     }
 
     public void serverScroll(int row) {
-        scroll.set(Math.max(0, Math.min(row, maxScrollRow())));
+        int clamped = Math.max(0, Math.min(row, maxScrollRow()));
+        if (clamped == scroll.get()) {
+            // 行号没变：同样不重推整屏（内容变化由 broadcastChanges 的指纹负责）
+            return;
+        }
+        scroll.set(clamped);
         sendContentToViewer();
     }
 
@@ -432,9 +501,10 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
         if (maid == null || !maid.level().isClientSide) {
             return;
         }
-        selected.set(sel);
-        scroll.set(row);
-        contentSize.set(total);
+        // 包里的数值一律夹到合法范围：即使服务端/别的模组发来异常值，也只影响显示，不能把界面搞崩
+        selected.set(Math.max(0, Math.min(sel, MaidBackpackData.SLOTS - 1)));
+        scroll.set(Math.max(0, Math.min(row, ModNetwork.MAX_SCROLL_ROW)));
+        contentSize.set(Math.max(0, total));
         for (int k = 0; k < VISIBLE; k++) {
             int slotIndex = CONTENT_BASE + k;
             // 容器没建全（女仆数据缺失等极端情况）时别越界，界面照样能正常关掉
@@ -513,17 +583,39 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
     @Override
     public void broadcastChanges() {
         if (maid != null && data != null && !maid.level().isClientSide) {
+            // 补做被节流挡掉的搜索 / 整理（各只留最新一条，见 serverSearch / serverSort）
+            long now = maid.level().getGameTime();
+            if (pendingSearch != null && now - lastSearchTick >= SEARCH_COOLDOWN_TICKS) {
+                String next = pendingSearch;
+                pendingSearch = null;
+                applySearch(next, now);
+            }
+            if (pendingSort && now - lastSortTick >= SORT_COOLDOWN_TICKS) {
+                pendingSort = false;
+                lastSortTick = now;
+                sortCurrentBackpack(sortMode());
+                sendContentToViewer();
+            }
             // DataSlot 理论上只会在 0~2；夹一下，别让异常值把服务端 tick 带崩
             int selectedIndex = Math.max(0, Math.min(selected.get(), MaidBackpackData.SLOTS - 1));
+            int preferred = data.rawMainSlot();
+            boolean preferredValid = preferred >= 0 && preferred < MaidBackpackData.SLOTS
+                    && !data.getStackInSlot(preferred).isEmpty();
             if (data.getStackInSlot(selectedIndex).isEmpty()) {
-                int next = firstNonEmptySlot();
+                // 正在看的那一格被拿走了：界面先临时显示"玩家选的主背包"或第一个还有包的格子。
+                // 注意这里不能 data.setMainSlot(next)——那会把玩家真正选中的主背包永久改写掉，
+                // 等他把原来的包放回原格，背上也不会再切回去（"主背包自己变成铁制"就是这个原因）。
+                int next = preferredValid ? preferred : firstNonEmptySlot();
                 if (next >= 0 && next != selectedIndex) {
                     selected.set(next);
                     scroll.set(Math.min(scroll.get(), maxScrollRow()));
-                    // 原来那个背包被拿走了：主背包自动换成还剩下的第一个
-                    data.setMainSlot(next);
                     sendContentToViewer();
                 }
+            } else if (preferredValid && preferred != selectedIndex) {
+                // 玩家选的主背包被取下后又装回来了：显示自动切回它，但存档里的 mainSlot 一直没动
+                selected.set(preferred);
+                scroll.set(Math.min(scroll.get(), maxScrollRow()));
+                sendContentToViewer();
             }
             int max = maxScrollRow();
             if (scroll.get() > max) {
@@ -572,45 +664,85 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
                 && player.distanceToSqr(maid) < 64.0;
     }
 
+    /**
+     * 关闭界面时把背包物品的最新 NBT 写回实体持久数据。
+     *
+     * 精妙背包的内容物其实存在它自己的 SavedData 里，物品 NBT 只记一个 contentsUuid；
+     * 而这个 uuid 是在第一次打开背包时懒生成的。我们实体上的背包数据是"快照"式存法，
+     * 不主动刷新的话，世界保存用的还是背包刚装上去时那份没有 uuid 的旧 NBT，
+     * 重进游戏就会生成一个新 uuid，看起来就是"背包里的东西全没了"。
+     */
+    @Override
+    public void removed(Player player) {
+        if (data != null && !player.level().isClientSide) {
+            data.saveToEntity();
+        }
+        super.removed(player);
+    }
+
     @Override
     public ItemStack quickMoveStack(Player player, int index) {
         ItemStack result = ItemStack.EMPTY;
         Slot slot = this.slots.get(index);
-        if (slot != null && slot.hasItem()) {
-            ItemStack stack = slot.getItem();
-            result = stack.copy();
-            boolean moved;
-            if (index >= CONTENT_BASE) {
-                moved = moveItemStackTo(stack, 0, PLAYER_INV_SIZE, true);
-            } else if (index >= BP_SLOT_BASE) {
-                moved = moveItemStackTo(stack, 0, PLAYER_INV_SIZE, true);
-            } else {
-                moved = false;
-                if (MaidBackpackData.isSophisticatedBackpack(stack) && stack.getCount() == 1) {
-                    moved = moveItemStackTo(stack, BP_SLOT_BASE, CONTENT_BASE, false);
-                }
-                if (!moved && MaidSophisticated.sophisticatedBackpacksLoaded()) {
-                    moved = SbCompat.insertAnywhere(currentBackpack(), stack);
-                    if (moved) {
-                        // 背包内部不是真的 Slot，原版差异同步要等下一 tick，
-                        // 这里主动整屏推一次，物品才会立刻出现在格子里。
-                        sendContentToViewer();
-                    }
-                }
-            }
-            if (!moved) {
-                return ItemStack.EMPTY;
-            }
-            if (stack.isEmpty()) {
-                slot.setByPlayer(ItemStack.EMPTY);
-            } else {
-                slot.setChanged();
-            }
-            if (stack.getCount() == result.getCount()) {
-                return ItemStack.EMPTY;
-            }
-            slot.onTake(player, stack);
+        if (slot == null || !slot.hasItem()) {
+            return result;
         }
+        ItemStack stack = slot.getItem();
+        result = stack.copy();
+        if (index >= CONTENT_BASE) {
+            // 背包内容格 → 玩家背包：绝不能学原版拿处理器返回的"活引用"直接 shrink——
+            // 那会绕过精妙背包内容处理器的变更通知（容量台账不更新、不标脏不保存）。
+            // 先整堆 extractItem 下来（走正规通道，通知齐全），再往玩家背包塞，
+            // 塞不下的原路 setStackInSlot 塞回，全程没有活引用旁路。
+            ItemStack extracted = slot.remove(result.getCount());
+            if (extracted.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+            boolean moved = moveItemStackTo(extracted, 0, PLAYER_INV_SIZE, true);
+            if (!extracted.isEmpty()) {
+                slot.set(extracted);
+            }
+            return moved ? result : ItemStack.EMPTY;
+        }
+        if (index >= BP_SLOT_BASE) {
+            // 三个专属背包槽 → 玩家背包：同理，extract 与 set 都走 ItemStackHandler 正规通道
+            ItemStack extracted = slot.remove(result.getCount());
+            if (extracted.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+            boolean moved = moveItemStackTo(extracted, 0, PLAYER_INV_SIZE, true);
+            if (!extracted.isEmpty()) {
+                slot.set(extracted);
+            }
+            return moved ? result : ItemStack.EMPTY;
+        }
+        // 玩家背包往上塞：源是玩家自己物品栏的活引用，改它本来就是原版 quickMove 的语义；
+        // 目标格的 set() 已经会写回处理器（MaidBackpackSlot / BackpackContentSlot 都走正规通道）。
+        boolean moved;
+        moved = false;
+        if (MaidBackpackData.isSophisticatedBackpack(stack) && stack.getCount() == 1) {
+            moved = moveItemStackTo(stack, BP_SLOT_BASE, CONTENT_BASE, false);
+        }
+        if (!moved && MaidSophisticated.sophisticatedBackpacksLoaded()) {
+            moved = SbCompat.insertAnywhere(currentBackpack(), stack);
+            if (moved) {
+                // 背包内部不是真的 Slot，原版差异同步要等下一 tick，
+                // 这里主动整屏推一次，物品才会立刻出现在格子里。
+                sendContentToViewer();
+            }
+        }
+        if (!moved) {
+            return ItemStack.EMPTY;
+        }
+        if (stack.isEmpty()) {
+            slot.setByPlayer(ItemStack.EMPTY);
+        } else {
+            slot.setChanged();
+        }
+        if (stack.getCount() == result.getCount()) {
+            return ItemStack.EMPTY;
+        }
+        slot.onTake(player, stack);
         return result;
     }
 

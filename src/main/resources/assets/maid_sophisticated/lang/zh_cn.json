@@ -1,6 +1,9 @@
 {
   "item.maid_sophisticated.maid_backpack_buckle": "女仆背包扣",
   "item.maid_sophisticated.maid_backpack_buckle.tooltip": "手持右键女仆：打开她的精妙背包标签页",
+  "item.maid_sophisticated.maid_backpack_marker": "背包占位标记（技术物品）",
+  "gui.maid_sophisticated.need_sb": "需要先安装精妙背包模组",
+  "gui.maid_sophisticated.marker_not_equippable": "这件物品不能装备给女仆",
   "gui.maid_sophisticated.tab": "精妙背包",
   "gui.maid_sophisticated.tab.desc": "给女仆装备最多 3 个精妙背包，点开查看内部",
   "gui.maid_sophisticated.prev": "上一个背包",
@@ -24,5 +27,6 @@
   "gui.maid_sophisticated.sort.category": "按分类",
   "gui.maid_sophisticated.toolbar.empty": "把精妙背包放进上面的格子",
   "gui.maid_sophisticated.main_backpack.set_main": "点击：把她背上显示的主背包换成这个",
-  "gui.maid_sophisticated.main_backpack.is_main": "当前主背包：背上的渲染就是这个"
+  "gui.maid_sophisticated.main_backpack.is_main": "当前主背包：背上的渲染就是这个",
+  "gui.maid_sophisticated.main_backpack.shift_take": "Shift+左键：把这个背包取下来"
 }

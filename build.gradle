@@ -1,8 +1,14 @@
 plugins { id 'java'; id 'net.minecraftforge.gradle' version '[6.0,6.2)' }
-version = '1.0.0-r18'
+version = '1.0.0-r39'
 group = 'dev.barryalen'
 base { archivesName = 'Touhou-Little-Maid-Sophisticated' }
 java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+repositories {
+    // forge 本体、MCP 映射、原版库都从这里取
+    maven { url = 'https://maven.minecraftforge.net/' }
+    mavenCentral()
+}
+
 minecraft { mappings channel: 'official', version: '1.20.1' }
 dependencies { minecraft 'net.minecraftforge:forge:1.20.1-47.4.0'
     // 编译期依赖：精妙背包、精妙核心与车万女仆（只做类型检查，不会打进成品 jar）
@@ -16,5 +22,7 @@ processResources {
     inputs.properties props
     filteringCharset = 'UTF-8'
     filesMatching('META-INF/mods.toml') { expand props }
+    // mods.toml 写的是 MIT，jar 里就得带上许可证原文（整合包/启动器会检查）
+    from('LICENSE') { into 'META-INF' }
 }
 jar.finalizedBy('reobfJar')

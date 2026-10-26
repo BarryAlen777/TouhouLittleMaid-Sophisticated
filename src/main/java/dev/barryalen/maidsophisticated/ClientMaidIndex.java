@@ -31,7 +31,8 @@ public final class ClientMaidIndex {
             return serverLevel.getEntity(uuid) instanceof LivingEntity living ? living : null;
         }
         Integer id = BY_UUID.get(uuid);
-        if (id != null && level.getEntity(id) instanceof LivingEntity living) {
+        // 再核对一次 UUID：实体 id 会被回收，光按 id 查可能拿到同 id 的另一只女仆
+        if (id != null && level.getEntity(id) instanceof LivingEntity living && living.getUUID().equals(uuid)) {
             return living;
         }
         return null;

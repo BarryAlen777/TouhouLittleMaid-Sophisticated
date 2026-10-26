@@ -1,4 +1,5 @@
 {
+  "parent": "minecraft:story/root",
   "criteria": {
     "first_maid_backpack": {
       "trigger": "maid_sophisticated:first_maid_backpack"

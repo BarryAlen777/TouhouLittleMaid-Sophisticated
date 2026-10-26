@@ -1,7 +1,6 @@
 package dev.barryalen.maidsophisticated.backpack;
 
 import com.github.tartaricacid.touhoulittlemaid.api.backpack.IMaidBackpack;
-import com.github.tartaricacid.touhoulittlemaid.client.model.bedrock.SimpleBedrockModel;
 import com.github.tartaricacid.touhoulittlemaid.entity.backpack.BackpackManager;
 import com.github.tartaricacid.touhoulittlemaid.entity.item.EntityTombstone;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
@@ -20,31 +19,17 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.registries.ForgeRegistries;
 
-import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
  * 车万女仆"背包类型"体系里的自定义类型：精妙背包。
  *
- * 为什么用这套：女仆背上的背包只由两条渲染层画（普通人形模型走 LayerMaidBackpack，
- * 另一种骨骼模型走 GeckoLayerMaidBackpack），它们都只认
- * {@code maid.getMaidBackpackType()} 这个注册类型，按 id 取"模型 + 贴图"贴到背上。
- * 也就是说：想让她背上出现什么，就得让"她当前的背包类型"变成我们注册的类型。
- *
- * 所以现在的做法是——渲染那一刻（{@code RenderMaidEvent}）把客户端的背包类型临时换成
- * 精妙背包对应的档位，渲染完立刻换回去。服务端的数据一点没动，她自己背包的容量、
- * 物品栏、存档全都还是原来的，两种背包可以同时装。
+ * <p>渲染时把客户端背包类型临时换成这个档位，让 TLM 自己的
+ * {@code LayerMaidBackpack} / {@code GeckoLayerMaidBackpack} 调用
+ * {@link MaidBackpackItemModel}，在原版背包的挂点和姿势上画物品模型。</p>
  */
 public final class SophMaidBackpack extends IMaidBackpack {
-    /**
-     * 模型文件放在本模组自己的资源里，坐标系和车万女仆自带的大背包完全一致
-     * （1 单位 = 1/16 格、y 往上、+z 朝女仆后背外侧），所以位置分毫不差。
-     * 由 tools/gen_backpack_model.py 生成。
-     */
-    private static final String MODEL_PATH = "/assets/" + MaidSophisticated.MOD_ID
-            + "/models/entity/backpack/soph_backpack.json";
-
     public static final SophMaidBackpack LEATHER = new SophMaidBackpack("leather", "backpack");
     public static final SophMaidBackpack COPPER = new SophMaidBackpack("copper", "copper_backpack");
     public static final SophMaidBackpack IRON = new SophMaidBackpack("iron", "iron_backpack");
@@ -56,9 +41,14 @@ public final class SophMaidBackpack extends IMaidBackpack {
 
     private static final Map<String, SophMaidBackpack> BY_ITEM_PATH = new HashMap<>();
 
-    /** 六个档位共用同一份几何，只是贴图不同。 */
-    private static EntityModel<EntityMaid> sharedModel;
-    private static boolean modelLoadTried;
+    /**
+     * 六个档位共用同一个物品模型绘制器。
+     *
+     * 注意必须懒加载：{@code MaidBackpackItemModel} 继承客户端专用的
+     * {@code EntityModel}，而这个类在服务端（{@code addMaidBackpack} 注册时）也会被
+     * 加载——静态字段写成 {@code = new ...} 会让专用服务端直接 NoClassDefFoundError。
+     */
+    private static EntityModel<EntityMaid> itemModel;
 
     static {
         for (SophMaidBackpack backpack : ALL) {
@@ -101,12 +91,19 @@ public final class SophMaidBackpack extends IMaidBackpack {
     }
 
     /**
-     * 用背包扣占位：这样车万女仆"右键直接换背包"的通用流程不会把精妙背包
-     * 装成女仆自己的背包类型（那个流程会挤掉她原本的背包，是我们不要的）。
+     * 返回一个生存里正常途径拿不到的技术占位物品，而不是真正的背包扣。
+     *
+     * 车万女仆会按 getItem() 建立"物品 → 背包类型"映射：谁拿着映射里的物品右键女仆，
+     * 她的换背包流程就会把女仆的背包类型改成这一档。背包扣一旦进这张表，
+     * "拿背包扣右键女仆开面板"就会顺带把她的客户端背包类型永久改掉
+     * （换包逻辑是交互预测，客户端也会执行，而我们的服务端处理会取消那次交互）。
+     * 占位物品正常途径拿不到，但 /give 之类仍能命中映射，所以拿它右键女仆的换包
+     * 路径在 {@code Events}（玩家交互事件，两侧都拦）和 {@code PickupEvents}
+     * （{@code InteractMaidEvent} 兜底）里各被拦掉一道。
      */
     @Override
     public Item getItem() {
-        return ModItems.MAID_BACKPACK_BUCKLE.get();
+        return ModItems.MAID_BACKPACK_MARKER.get();
     }
 
     @Override
@@ -157,20 +154,10 @@ public final class SophMaidBackpack extends IMaidBackpack {
     @Override
     @OnlyIn(Dist.CLIENT)
     public EntityModel<EntityMaid> getBackpackModel(EntityModelSet modelSet) {
-        if (!modelLoadTried) {
-            modelLoadTried = true;
-            try (InputStream stream = SophMaidBackpack.class.getResourceAsStream(MODEL_PATH)) {
-                if (stream == null) {
-                    MaidSophisticated.LOGGER.error("Maid backpack model resource is missing: {}", MODEL_PATH);
-                } else {
-                    sharedModel = new SimpleBedrockModel<>(stream);
-                }
-            } catch (Exception | LinkageError e) {
-                // 以前这里静默吞异常，导致背上永远不显示还查不出来；现在打进日志
-                MaidSophisticated.LOGGER.error("Failed to build maid sophisticated backpack model", e);
-            }
+        if (itemModel == null) {
+            itemModel = new MaidBackpackItemModel();
         }
-        return sharedModel;
+        return itemModel;
     }
 
     @Override

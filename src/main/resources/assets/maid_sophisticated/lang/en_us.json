@@ -1,6 +1,9 @@
 {
   "item.maid_sophisticated.maid_backpack_buckle": "Maid Backpack Buckle",
   "item.maid_sophisticated.maid_backpack_buckle.tooltip": "Right-click a maid to open her Sophisticated Backpack tab",
+  "item.maid_sophisticated.maid_backpack_marker": "Backpack Marker (technical)",
+  "gui.maid_sophisticated.need_sb": "Requires the Sophisticated Backpacks mod",
+  "gui.maid_sophisticated.marker_not_equippable": "This item cannot be equipped to a maid",
   "gui.maid_sophisticated.tab": "Sophisticated Backpack",
   "gui.maid_sophisticated.tab.desc": "Equip up to 3 Sophisticated Backpacks on a maid",
   "gui.maid_sophisticated.prev": "Previous backpack",
@@ -24,5 +27,6 @@
   "gui.maid_sophisticated.sort.category": "category",
   "gui.maid_sophisticated.toolbar.empty": "Put a Sophisticated Backpack in the slot above",
   "gui.maid_sophisticated.main_backpack.set_main": "Click: show this backpack on her back",
-  "gui.maid_sophisticated.main_backpack.is_main": "Main backpack: this is the one rendered on her back"
+  "gui.maid_sophisticated.main_backpack.is_main": "Main backpack: this is the one rendered on her back",
+  "gui.maid_sophisticated.main_backpack.shift_take": "Shift+left-click: take this backpack off"
 }

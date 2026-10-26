@@ -2,6 +2,7 @@ package dev.barryalen.maidsophisticated;
 
 import dev.barryalen.maidsophisticated.advancement.FirstMaidBackpackTrigger;
 
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -27,10 +28,12 @@ import net.minecraftforge.event.entity.EntityJoinLevelEvent;
 import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
 import net.minecraftforge.event.entity.living.LivingDropsEvent;
 import net.minecraftforge.event.entity.player.PlayerInteractEvent;
+import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.registries.ForgeRegistries;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -44,6 +47,8 @@ public final class Events {
             Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<LivingEntity, Boolean>()));
 
     private static int tickCounter = 0;
+    /** 快照刷新轮换的批数：15 批 × 40 tick = 600 tick（30 秒）存一圈。 */
+    private static final int SAVE_BAND_COUNT = 15;
 
     private Events() {}
 
@@ -68,8 +73,10 @@ public final class Events {
     /** 主人校验：驯服过的女仆只认主人；野生女仆谁都能操作。 */
     public static boolean isMaidOwner(@Nullable LivingEntity maid, Player player) {
         if (maid instanceof TamableAnimal tamable) {
-            var owner = tamable.getOwner();
-            return owner == null || owner.getUUID().equals(player.getUUID());
+            // 用 UUID 比，别用 getOwner()：主人下线时 getOwner() 是 null，
+            // 那样会被当成"野生女仆"，别人就能开她背包了。
+            java.util.UUID ownerId = tamable.getOwnerUUID();
+            return ownerId == null || ownerId.equals(player.getUUID());
         }
         return true;
     }
@@ -130,8 +137,39 @@ public final class Events {
         if (!isMaid(event.getEntity())) {
             return;
         }
-        if (event.getLevel() instanceof ServerLevel) {
-            MaidBackpackData.of(event.getEntity()).ifPresent(MaidBackpackData::saveToEntity);
+        if (event.getLevel() instanceof ServerLevel level && event.getEntity() instanceof LivingEntity living) {
+            MaidBackpackData.of(living).ifPresent(data -> {
+                // 死亡兜底：正常死亡时 onLivingDrops 已经把包清空了（数据走掉落物）。
+                // 走到这里还"非空 + 已移除 + 原因是死亡"，说明掉落事件根本没发生
+                //（比如别的模组把 doMobLoot 关了、或女仆模组的墓碑流程跳过了掉落事件）——
+                // 不补掉的话背包就跟着实体一起没了。掉落原因必须严格只认 KILLED：
+                // 切维度 / 区块卸载时实体同样 isRemoved，但数据要原样留给新实例，不能掉；
+                // DISCARDED 更不能当死亡——精灵球、金套索这类"收服"模组是先把女仆的存档数据
+                // 抄进球里再 discard() 实体的，我们这里把背包掉地上，球里那份还带着包，
+                // 放出来就是两份（复制物品）。收服流程的数据由对方球自己负责，我们别插手。
+                // 时序已考证（照 1.20.1 反混淆字节码逐条核过，不是猜）：Entity#remove(reason)
+                // 的第一步就写 removalReason 字段，之后才走 inLevelCallback 回调链，
+                // 链尾（ServerLevel 实体表 remove 处）才发 EntityLeaveLevelEvent；
+                // 而 1.20.1 的 isRemoved() 实现就是 removalReason != null。
+                // 所以事件触发的一瞬两个条件必然都已成立，这个兜底是活的：
+                // 女仆死亡 1 秒（deathTime 攒满 20 tick）后 remove(KILLED) → 事件 → 掉包。
+                Entity.RemovalReason reason = living.getRemovalReason();
+                boolean goneForGood = living.isRemoved() && reason == Entity.RemovalReason.KILLED;
+                if (goneForGood && !MaidBackpackData.isEmptyHandler(data)) {
+                    for (ItemStack stack : data.copyStacks()) {
+                        if (stack.isEmpty()) {
+                            continue;
+                        }
+                        ItemEntity drop = new ItemEntity(level,
+                                living.getX(), living.getY() + 0.3, living.getZ(), stack);
+                        drop.setDefaultPickUpDelay();
+                        level.addFreshEntity(drop);
+                    }
+                    data.clearAndDetach();
+                } else {
+                    data.saveToEntity();
+                }
+            });
         }
         TRACKED_MAIDS.remove(event.getEntity());
         ClientMaidIndex.untrack(event.getEntity());
@@ -146,11 +184,77 @@ public final class Events {
         }
     }
 
+    /**
+     * 取一份"当前跟踪的女仆"快照。
+     *
+     * TRACKED_MAIDS 底层是 WeakHashMap：GC 随时可能回收键，直接边遍历边被 GC 清项
+     * 就是 CME 的经典现场；synchronizedSet 也只是让单个方法原子，遍历仍需自己上锁。
+     * 所以统一在锁内拷贝一份，遍历走快照。
+     */
+    private static List<LivingEntity> trackedMaidsSnapshot() {
+        synchronized (TRACKED_MAIDS) {
+            return new ArrayList<>(TRACKED_MAIDS);
+        }
+    }
+
+    /**
+     * 世界保存前把女仆背包数据刷新一遍。
+     *
+     * 原版保存实体时不会帮我们序列化 capability，我们存的是"快照"。而精妙背包的
+     * contentsUuid 等物品 NBT 是在运行中懒生成的，快照不刷新的话，这次保存写下去的还是旧 NBT。
+     * {@code LevelEvent.Save} 在实体保存之后触发，所以这里刷的是"下一次保存"用的快照，
+     * 再配合下面的定时刷新和 {@link #onServerStopping} 就不会丢数据。
+     */
+    @SubscribeEvent
+    public static void onLevelSave(net.minecraftforge.event.level.LevelEvent.Save event) {
+        if (!(event.getLevel() instanceof ServerLevel level)) {
+            return;
+        }
+        for (LivingEntity maid : trackedMaidsSnapshot()) {
+            if (!maid.isRemoved() && maid.level() == level) {
+                MaidBackpackData.of(maid).ifPresent(MaidBackpackData::saveToEntity);
+            }
+        }
+    }
+
+    /** 服务器关闭：原版紧接着就会保存世界，这里赶在保存前把最新数据写回（关服才退出游戏也安全）。 */
+    @SubscribeEvent
+    public static void onServerStopping(ServerStoppingEvent event) {
+        for (LivingEntity maid : trackedMaidsSnapshot()) {
+            if (!maid.isRemoved()) {
+                MaidBackpackData.of(maid).ifPresent(MaidBackpackData::saveToEntity);
+            }
+        }
+        // 单级整合包重启服务端不换类加载器时，上一局的实体引用会留在这里：
+        // 快照集虽然会随 GC 变空，但关服是清空它的最佳时机。
+        synchronized (TRACKED_MAIDS) {
+            TRACKED_MAIDS.clear();
+        }
+    }
+
     /** 女仆死亡：背包从独立槽里掉出来，内容物跟着背包物品本身走，不会丢。 */
-@SubscribeEvent
+@SubscribeEvent(priority = EventPriority.LOWEST)
         public static void onLivingDrops(LivingDropsEvent event) {
         LivingEntity entity = event.getEntity();
         if (entity.level().isClientSide || !isMaid(entity)) {
+            return;
+        }
+        // 别的模组取消了掉落（墓碑 / 收尸袋 / 保留物品之类）：它只会搬走 event.getDrops() 里的东西，
+        // 而我们挂在实体 PersistentData 上的背包根本不在那个列表里，随实体一起消失就等于背包没了。
+        // 所以这里自己把背包掉在地上，但不放进 event.getDrops()，避免和墓碑里的东西重复。
+        if (event.isCanceled()) {
+            MaidBackpackData.of(entity).ifPresent(data -> {
+                for (ItemStack stack : data.copyStacks()) {
+                    if (stack.isEmpty()) {
+                        continue;
+                    }
+                    ItemEntity drop = new ItemEntity(entity.level(),
+                            entity.getX(), entity.getY() + 0.3, entity.getZ(), stack);
+                    drop.setDefaultPickUpDelay();
+                    entity.level().addFreshEntity(drop);
+                }
+                data.clearAndDetach();
+            });
             return;
         }
         MaidBackpackData.of(entity).ifPresent(data -> {
@@ -171,10 +275,13 @@ public final class Events {
      * 右键女仆：
      * - 手持"女仆背包扣"→ 打开女仆 GUI 的精妙背包标签页；
      * - 手持精妙背包（恰好 1 个）→ 直接装备到空槽（最多 3 个背包）。
+     *
+     * 背包扣这一支在客户端也要拦：女仆模组的交互是"客户端预测 + 服务端补包"两条腿，
+     * 只拦服务端的话，客户端本地那半套换背包预测照样会跑一遍，把她的客户端背包类型改脏。
      */
 @SubscribeEvent(priority = EventPriority.HIGHEST)
         public static void onEntityInteractSpecific(PlayerInteractEvent.EntityInteractSpecific event) {
-        if (event.getLevel().isClientSide || !isMaid(event.getTarget())) {
+        if (!isMaid(event.getTarget())) {
             return;
         }
         Player player = event.getEntity();
@@ -184,19 +291,54 @@ public final class Events {
         }
         LivingEntity maid = (LivingEntity) event.getTarget();
 
-        if (held.is(net.minecraft.world.item.Items.AIR)) {
-            return;
-        }
-
         if (held.getItem() == ModItems.MAID_BACKPACK_BUCKLE.get()) {
-            // 非主人不许开别人家女仆的背包；没装精妙背包时也不开（开了也没内容可显示）
+            // 非主人不许开别人家女仆的背包；两侧都不拦，让原版交互照常走
             if (!isMaidOwner(maid, player)) {
                 return;
             }
-            if (player instanceof ServerPlayer serverPlayer && openMaidPanel(serverPlayer, maid)) {
+            if (event.getLevel().isClientSide) {
+                // 拦住客户端的换包预测：背包扣不是任何背包物品，女仆不该对她做任何事
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
+                return;
             }
+            if (player instanceof ServerPlayer serverPlayer) {
+                if (openMaidPanel(serverPlayer, maid)) {
+                    event.setCanceled(true);
+                    event.setCancellationResult(InteractionResult.SUCCESS);
+                } else {
+                    // 打不开面板（没装精妙背包等）也必须取消：不能让交互落到车万女仆的换包逻辑，
+                    // 那条路会真把她原有的背包挤下来换成占位档，还把 1 个背包扣吃掉
+                    serverPlayer.displayClientMessage(
+                            Component.translatable("gui." + MaidSophisticated.MOD_ID + ".need_sb"), true);
+                    event.setCanceled(true);
+                    event.setCancellationResult(InteractionResult.SUCCESS);
+                }
+            }
+            return;
+        }
+
+        if (held.getItem() == ModItems.MAID_BACKPACK_MARKER.get()) {
+            // 占位物品生存里正常途径拿不到，但 /give、创造"满遍"标签页能拿到。
+            // 女仆模组按各背包类型的 getItem() 建了"物品→背包类型"映射，六档精妙背包共用
+            // 这一件占位物品：拿着它右键一个装了自己背包的女仆，会走她的换包流程——
+            // 她的包当场被取下塞回玩家背包、背包类型被挤成精妙档（等 onPutOn 兜底才还原），
+            // 整个过程还白吃 1 个占位物品。两侧都要拦（换包是"客户端预测 + 服务端补包"
+            // 两条腿，逻辑同上面背包扣那支）。
+            if (!event.getLevel().isClientSide) {
+                // 给它个下文：不然拿着它右键装了自有背包的女仆，物品凭空少 1 还没有任何反馈
+                player.displayClientMessage(
+                        Component.translatable("gui." + MaidSophisticated.MOD_ID + ".marker_not_equippable"), true);
+            }
+            event.setCanceled(true);
+            event.setCancellationResult(InteractionResult.SUCCESS);
+            return;
+        }
+
+        if (event.getLevel().isClientSide) {
+            return;
+        }
+        if (held.is(net.minecraft.world.item.Items.AIR)) {
             return;
         }
 
@@ -246,7 +388,11 @@ public final class Events {
     /**
      * 服务器节流的后台维护：
      * - 每 10 tick：女仆附近掉落物按"女仆自己的物品栏 → 女仆自己的背包 → 精妙背包"顺序收取；
-     * - 每 40 tick：女仆手上空着时，按同样顺序搜一把趁手工具塞到手上（"取用自动搜包"）。
+     * - 每 40 tick：女仆手上空着时，按同样顺序搜一把趁手工具塞到手上（"取用自动搜包"）；
+     * - 每 40 tick：补发背包外观同步；
+     * - 每 600 tick（30 秒，按实体 id 分批错开）：把背包数据的最新快照写回实体。
+     *
+     * 三种活都没轮到的 tick 直接返回，不再每 tick 遍历女仆表。
      */
 @SubscribeEvent
         public static void onServerTick(TickEvent.ServerTickEvent event) {
@@ -263,7 +409,9 @@ public final class Events {
         if (!TlmCompat.loaded() || !MaidSophisticated.sophisticatedBackpacksLoaded()) {
             return;
         }
-        for (LivingEntity maid : TRACKED_MAIDS) {
+        // 快照刷新按 15 批轮换：每次 statePass 只存 1/15 的女仆，一轮 15×40 = 600 tick 转完。
+        int saveBand = (tickCounter / 40) % SAVE_BAND_COUNT;
+        for (LivingEntity maid : trackedMaidsSnapshot()) {
             if (maid.isRemoved() || !(maid.level() instanceof ServerLevel level)) {
                 continue;
             }
@@ -271,17 +419,27 @@ public final class Events {
             if (data == null) {
                 continue;
             }
+            // 刷新实体上的快照：背包物品的 NBT（contentsUuid、颜色、设置）是在运行中才写进物品里的，
+            // 不刷新的话世界保存写下去的还是旧快照，重进游戏背包里的东西会丢。
+            // 内容变化时 onContentsChanged 会立刻存一次，这里只是兜底，所以 30 秒一次就够。
+            if (statePass && Math.floorMod(maid.getId(), SAVE_BAND_COUNT) == saveBand
+                    && !MaidBackpackData.isEmptyHandler(data)) {
+                data.saveToEntity();
+            }
             // 兜底补发背包状态：女仆刚刷出来时首个同步包可能早于客户端建好实体而丢掉，
             // 每两秒补一次，客户端最多两秒就能把背上的外观纠正过来。
-            if (statePass) {
+            // 一个背包都没有、而且"空"这个状态也已经同步过的女仆直接跳过：
+            // 大基地里多数女仆根本没背包，空包广播发一次就够，不该每两秒全服重来一遍。
+            // 从有到无 / 从无到有都会走 onContentsChanged 的即时同步，这里只是补丢包。
+            if (statePass && !(MaidBackpackData.isEmptyHandler(data) && data.isEmptyStateSynced())) {
                 ModNetwork.syncMaidBackpack(maid, data);
             }
             // 没有精妙背包的女仆不归我们管，交给她自己的 AI
             if (MaidBackpackData.isEmptyHandler(data)) {
                 continue;
             }
-            // 女仆自己的"拾取"开关关着，就别替她捡东西
-            if (pickupPass && TlmCompat.isPickupEnabled(maid)) {
+            // 女仆自己的"拾取"开关关着，或者她正坐着休息，就别替她捡东西
+            if (pickupPass && TlmCompat.isPickupEnabled(maid) && !TlmCompat.isSitting(maid)) {
                 pickupNearbyItems(level, maid, data);
             }
             if (refillPass) {
@@ -303,6 +461,10 @@ public final class Events {
             if (!(entity instanceof ItemEntity itemEntity) || itemEntity.isRemoved()) {
                 continue;
             }
+            // 女仆模组自己的拾取规则（配置黑名单等）：她本来就不能捡的东西，我们也不替她捡
+            if (!TlmCompat.canMaidPickupItem(itemEntity.getItem())) {
+                continue;
+            }
             ItemStack before = itemEntity.getItem().copy();
             ItemStack remaining = before.copy();
             // 1 + 2：女仆自己的物品栏与她自己背包的格子
@@ -322,6 +484,8 @@ public final class Events {
             if (taken > 0) {
                 // 和女仆自己弯腰捡一样记一次"拾取"，经验与拾取动画都按原版走
                 maid.take(itemEntity, taken);
+                TlmCompat.playPickupSound(maid);
+                TlmCompat.postPickupResult(maid, before, taken);
             }
             if (remaining.isEmpty()) {
                 itemEntity.discard();

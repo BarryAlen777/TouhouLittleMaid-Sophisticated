@@ -6,7 +6,6 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.common.util.LazyOptional;
 import net.minecraftforge.network.NetworkHooks;
-import net.p3pp3rf1y.sophisticatedbackpacks.backpack.BackpackItem;
 import net.p3pp3rf1y.sophisticatedbackpacks.backpack.wrapper.IBackpackWrapper;
 import net.p3pp3rf1y.sophisticatedbackpacks.common.gui.BackpackContainer;
 import net.p3pp3rf1y.sophisticatedbackpacks.common.gui.BackpackContext;
@@ -68,14 +67,15 @@ public final class SbCompat {
         }
     }
 
-    /** 这个物品是不是精妙背包本体（类型判断，只在精妙背包在场时调用）。 */
-    public static boolean isBackpack(ItemStack stack) {
-        return !stack.isEmpty() && stack.getItem() instanceof BackpackItem;
-    }
-
     /** 用精妙背包的原生界面打开女仆身上第 slot 格背包。 */
     public static void openBackpackGui(ServerPlayer player, LivingEntity maid, int slot) {
         if (slot < 0 || slot >= MaidBackpackData.SLOTS) {
+            return;
+        }
+        // 兜底再校验一次（调用方已经查过）：原生界面一旦打开就能直接改背包内容，
+        // 权限/距离/维度任何一项不满足都不该走到这里。
+        if (maid.isRemoved() || maid.level() != player.level() || !Events.isMaidOwner(maid, player)
+                || maid.distanceToSqr(player) > 64.0) {
             return;
         }
         ItemStack stack = MaidBackpackData.of(maid)
@@ -88,6 +88,9 @@ public final class SbCompat {
                 new SimpleMenuProvider((windowId, playerInventory, menuPlayer) ->
                         new BackpackContainer(windowId, menuPlayer, context), context.getDisplayName(player)),
                 buffer -> context.toBuffer(buffer, player));
+        // 原生界面构造时会懒生成 contentsUuid 等物品 NBT；立刻把快照刷新一次，
+        // 免得实体保存时用的还是没有 uuid 的旧物品数据（重载后背包内容会"消失"）。
+        MaidBackpackData.of(maid).ifPresent(MaidBackpackData::saveToEntity);
     }
 
     /** 往背包物品堆里插入物品（走精妙背包对外暴露的 ITEM_HANDLER 能力，尊重背包筛选）。 */
@@ -129,11 +132,6 @@ public final class SbCompat {
         return backpackStack.getCapability(net.p3pp3rf1y.sophisticatedbackpacks.api.CapabilityBackpackWrapper.getCapabilityInstance())
                 .map(IBackpackWrapper::getInventoryHandler)
                 .map(h -> (net.minecraftforge.items.IItemHandlerModifiable) h);
-    }
-
-    /** 内部物品栏槽数，空包 / 没装精妙背包时返回 0。 */
-    public static int inventoryHandlerSize(ItemStack backpackStack) {
-        return inventoryHandler(backpackStack).map(net.minecraftforge.items.IItemHandlerModifiable::getSlots).orElse(0);
     }
 
     /**

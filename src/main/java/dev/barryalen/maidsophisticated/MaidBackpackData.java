@@ -2,7 +2,6 @@ package dev.barryalen.maidsophisticated;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.items.ItemStackHandler;
 import net.minecraftforge.registries.ForgeRegistries;
@@ -35,6 +34,11 @@ public class MaidBackpackData extends ItemStackHandler {
     private boolean showSophisticated = false;
     /** 背上显示的是第几个槽的背包（-1 = 没手动选过，自动取第一个有背包的格子）。 */
     private int mainSlot = -1;
+    /**
+     * "一个背包都没有"这件事是否已经同步给客户端过（只在运行期用，不进存档）。
+     * 兜底的周期性外观广播靠它跳过一直空着的女仆，不再每两秒全服重发空包。
+     */
+    private transient boolean emptyStateSynced = false;
 
     public MaidBackpackData(LivingEntity owner) {
         super(SLOTS);
@@ -183,6 +187,19 @@ public class MaidBackpackData extends ItemStackHandler {
         mainSlot = tag.contains(TAG_MAIN_SLOT) ? tag.getInt(TAG_MAIN_SLOT) : -1;
     }
 
+    /**
+     * "空包状态是否已经同步过"。只在服务端有意义：
+     * 每次对外广播背包状态（{@link ModNetwork#syncMaidBackpack} 等）后，
+     * 由发包处按"这次发出去的是不是全空"调用本方法记账。
+     */
+    public void markEmptyStateSynced(boolean nowEmpty) {
+        this.emptyStateSynced = nowEmpty;
+    }
+
+    public boolean isEmptyStateSynced() {
+        return emptyStateSynced;
+    }
+
     @Override
     protected void onContentsChanged(int slot) {
         if (applyingRemote) {
@@ -203,15 +220,21 @@ public class MaidBackpackData extends ItemStackHandler {
         }
         applyingRemote = false;
         this.showSophisticated = showSophisticated;
-        this.mainSlot = mainSlot;
+        // 网络来的下标同样夹一下，别让 -99 或 99 这种值影响后面的判断
+        this.mainSlot = Math.max(-1, Math.min(mainSlot, SLOTS - 1));
     }
 
     public void loadFromEntity(CompoundTag tag) {
         deserializeNBT(tag);
     }
 
+    /**
+     * 把当前数据（三个背包物品连同它们的最新 NBT）写进实体持久数据。
+     *
+     * 只在服务端写：客户端改的是本地副本，写进去也不会被保存，反而可能覆盖真实数据。
+     */
     public void saveToEntity() {
-        if (owner == null) {
+        if (owner == null || owner.level() == null || owner.level().isClientSide) {
             return;
         }
         owner.getPersistentData().put(SAVE_TAG, serializeNBT());
@@ -233,13 +256,10 @@ public class MaidBackpackData extends ItemStackHandler {
         applyingRemote = false;
         showSophisticated = false;
         mainSlot = -1;
+        // 包没了，"空状态已同步"要重新记：换女仆 / 复用实例时别拿着旧账跳过首次广播
+        emptyStateSynced = false;
         if (owner != null) {
             owner.getPersistentData().remove(SAVE_TAG);
         }
-    }
-
-    /** 交互者是否允许打开这个女仆的背包：驯服过的女仆只认主人（原版可驯服动物接口）。 */
-    public boolean canOpen(Player player) {
-        return Events.isMaidOwner(owner, player);
     }
 }
