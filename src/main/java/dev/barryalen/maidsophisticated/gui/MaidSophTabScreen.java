@@ -1,8 +1,11 @@
 package dev.barryalen.maidsophisticated.gui;
 
+import com.github.tartaricacid.touhoulittlemaid.api.event.MaidTaskEnableEvent;
+import com.github.tartaricacid.touhoulittlemaid.api.task.IMaidTask;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.entity.cache.CacheIconManager;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.sound.MaidSoundPackGui;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.MaidDownloadButton;
+import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.TaskButton;
 import com.github.tartaricacid.touhoulittlemaid.client.resource.CustomPackLoader;
 import com.github.tartaricacid.touhoulittlemaid.compat.ysm.YsmCompat;
 import com.github.tartaricacid.touhoulittlemaid.compat.ysm.event.OpenYsmMaidScreenEvent;
@@ -10,8 +13,10 @@ import com.github.tartaricacid.touhoulittlemaid.entity.ai.brain.MaidGomokuAI;
 import com.github.tartaricacid.touhoulittlemaid.entity.ai.brain.MaidSchedule;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.TabIndex;
+import com.github.tartaricacid.touhoulittlemaid.entity.task.TaskManager;
 import com.github.tartaricacid.touhoulittlemaid.network.NetworkHandler;
 import com.github.tartaricacid.touhoulittlemaid.network.message.MaidConfigMessage;
+import com.github.tartaricacid.touhoulittlemaid.network.message.MaidTaskMessage;
 import com.github.tartaricacid.touhoulittlemaid.network.message.ToggleTabMessage;
 import com.github.tartaricacid.touhoulittlemaid.util.GuiTools;
 import com.github.tartaricacid.touhoulittlemaid.util.ParseI18n;
@@ -21,6 +26,8 @@ import dev.barryalen.maidsophisticated.ModItems;
 import dev.barryalen.maidsophisticated.ModNetwork;
 import dev.barryalen.maidsophisticated.TlmCompat;
 import dev.barryalen.maidsophisticated.client.MaidSophTabButton;
+import dev.barryalen.maidsophisticated.client.MaidSophTaskButton;
+import dev.barryalen.maidsophisticated.client.MaidTaskListState;
 import dev.barryalen.maidsophisticated.client.SophBackpackRender;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
@@ -70,6 +77,9 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     /** 精妙背包自己的图标表：搜索、整理、排序的图标直接借用，画风和原生界面一致。 */
     private static final ResourceLocation SB_ICONS =
             new ResourceLocation("sophisticatedcore", "textures/gui/icons.png");
+    /** 女仆自己的"工作模式列表"贴图：整块面板 + 翻页按钮 + 每个模式一行。 */
+    private static final ResourceLocation TASK =
+            new ResourceLocation("touhou_little_maid", "textures/gui/maid_gui_task.png");
 
     /**
      * 图标坐标全部照抄精妙背包自己的 {@code ButtonDefinitions}：
@@ -113,6 +123,9 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     private EditBox searchBox;
     private boolean searchOpen;
     private String searchText = "";
+    // 工作列表"开没开"和"第几页"不放在这里：它们存在 {@link MaidTaskListState}，
+    // 和车万女仆自己的界面共用同一份状态。否则从女仆首页切过来，
+    // 我们这份默认"关着"的状态会把列表重新关掉——开关就不同步了。
 
     public MaidSophTabScreen(MaidSophTabContainer menu, Inventory inv, Component titleIn) {
         super(menu, inv, titleIn);
@@ -157,6 +170,11 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
         if (maid instanceof EntityMaid entityMaid) {
             addPreviewButtons(entityMaid);
             addLeftColumnWidgets(entityMaid);
+            // 工作模式列表：展开时才建按钮（12 个模式按钮 + 翻页/关闭）。
+            // 开没开是和女仆首页共用的那个开关：在女仆页展开着切过来，这里照样展开。
+            if (MaidTaskListState.isOpen()) {
+                addTaskListWidgets(entityMaid);
+            }
         }
     }
 
@@ -375,11 +393,12 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     }
 
     private void addLeftColumnWidgets(EntityMaid maid) {
-        int id = maid.getId();
-        // 任务按钮：显示当前任务，点击回女仆主页管理任务清单
+        // 当前工作模式按钮：本体那张 71×21 的长条，点一下在左边展开工作模式列表，
+        // 和女仆首页的任务按钮完全同一套行为（贴图坐标都一样）。
         ImageButton task = new ImageButton(leftPos + 4, topPos + 159, 71, 21, 0, 42, 22, BUTTON,
-                b -> NetworkHandler.CHANNEL.sendToServer(new ToggleTabMessage(id, TabIndex.MAIN)));
-        task.setTooltip(Tooltip.create(Component.translatable("gui." + MaidSophisticated.MOD_ID + ".open_task_page")));
+                b -> toggleTaskList());
+        task.setTooltip(Tooltip.create(Component.translatable(
+                "gui." + MaidSophisticated.MOD_ID + ".task_list.tip")));
         this.addRenderableWidget(task);
         // 日程条：点击循环 全天/白天/黑夜，和女仆首页一致
         this.addRenderableWidget(new SophScheduleButton(leftPos + 9, topPos + 187, maid));
@@ -395,6 +414,142 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     }
 
     private enum Mode { HOME, PICKUP, RIDE }
+
+    // ---------- 工作模式列表 ----------
+
+    /** 一页 12 个模式，和女仆首页那张列表一样（一行 19 像素）。 */
+    private static final int TASKS_PER_PAGE = MaidTaskListState.TASKS_PER_PAGE;
+    /** 列表面板：贴在主界面左边外面（和女仆首页同一个位置、同一张底图）。 */
+    private static final int TASK_PANEL_X = -93;
+    private static final int TASK_PANEL_Y = 5;
+    private static final int TASK_PANEL_W = 92;
+    private static final int TASK_PANEL_H = 251;
+
+    /**
+     * 展开 / 收起工作模式列表。
+     *
+     * <p>翻转的是和女仆首页共用的那个开关（{@link MaidTaskListState}），
+     * 所以在这边收起，回到女仆首页列表也是收起的；翻到第几页同样共用。</p>
+     */
+    private void toggleTaskList() {
+        MaidTaskListState.setOpen(!MaidTaskListState.isOpen());
+        this.rebuildWidgets();
+    }
+
+    /**
+     * 把工作模式列表铺出来：用车万女仆自己的 {@link TaskButton} 的子类，
+     * 图标、名字、选不了时的灰化和条件说明全按本体那套画，只把"鼠标点不动"这一条改掉
+     * （详见 {@link MaidSophTaskButton}：这一页是发包交给服务端裁决，客户端不该拦点击）。
+     */
+    private void addTaskListWidgets(EntityMaid maid) {
+        List<IMaidTask> tasks = TaskManager.getNotHiddenTaskList(maid);
+        int pages = Math.max(1, (tasks.size() + TASKS_PER_PAGE - 1) / TASKS_PER_PAGE);
+        int page = Mth.clamp(MaidTaskListState.page(), 0, pages - 1);
+        // 页码也写回共用状态，免得切回女仆页时两边显示的页不一样
+        MaidTaskListState.setPage(page);
+        int start = page * TASKS_PER_PAGE;
+        for (int i = 0; i < TASKS_PER_PAGE; i++) {
+            int index = start + i;
+            if (index >= tasks.size()) {
+                break;
+            }
+            IMaidTask task = tasks.get(index);
+            boolean enabled = isTaskEnabled(maid, task);
+            TaskButton button = new MaidSophTaskButton(task, enabled,
+                    leftPos - 89, topPos + 23 + 19 * i, 83, 19, 93, 28, 20, TASK, 256, 256,
+                    b -> switchTask(maid, task, enabled));
+            button.setTooltip(Tooltip.create(taskTooltip(maid, task, enabled)));
+            this.addRenderableWidget(button);
+        }
+
+        // 上翻 / 下翻 / 收起：贴图坐标照抄女仆首页那三个小按钮
+        addTaskPageButton(leftPos - 89, topPos + 9, 16, 13, 110,
+                "gui." + MaidSophisticated.MOD_ID + ".task_list.prev_page", b -> {
+                    int current = MaidTaskListState.page();
+                    if (current > 0) {
+                        MaidTaskListState.setPage(current - 1);
+                        rebuildWidgets();
+                    }
+                });
+        addTaskPageButton(leftPos - 72, topPos + 9, 16, 13, 93,
+                "gui." + MaidSophisticated.MOD_ID + ".task_list.next_page", b -> {
+                    int current = MaidTaskListState.page();
+                    if ((current + 1) * TASKS_PER_PAGE < tasks.size()) {
+                        MaidTaskListState.setPage(current + 1);
+                        rebuildWidgets();
+                    }
+                });
+        addTaskPageButton(leftPos - 19, topPos + 9, 13, 13, 127,
+                "gui." + MaidSophisticated.MOD_ID + ".task_list.close", b -> toggleTaskList());
+    }
+
+    private void addTaskPageButton(int x, int y, int w, int h, int u, String tooltipKey, Button.OnPress press) {
+        ImageButton button = new ImageButton(x, y, w, h, u, 0, 14, TASK, press);
+        button.setTooltip(Tooltip.create(Component.translatable(tooltipKey)));
+        this.addRenderableWidget(button);
+    }
+
+    /**
+     * 模式能不能选：和女仆首页同一套判断——空闲永远可选，其余先问别的模组
+     * （{@link MaidTaskEnableEvent} 允许它们禁用某种模式），再看她现在的状态满不满足条件。
+     */
+    private static boolean isTaskEnabled(EntityMaid maid, IMaidTask task) {
+        if (task == TaskManager.getIdleTask()) {
+            return true;
+        }
+        List<com.mojang.datafixers.util.Pair<String, java.util.function.Predicate<EntityMaid>>> hints =
+                new ArrayList<>();
+        if (MinecraftForge.EVENT_BUS.post(new MaidTaskEnableEvent(task, maid, hints))) {
+            return false;
+        }
+        return task.isEnable(maid);
+    }
+
+    /** 模式按钮的悬停说明：名字 +（选不了时）缺了哪几个条件。 */
+    private static Component taskTooltip(EntityMaid maid, IMaidTask task, boolean enabled) {
+        MutableComponent text = task.getName().copy();
+        if (!enabled) {
+            for (var pair : task.getEnableConditionDesc(maid)) {
+                boolean met = pair.getSecond().test(maid);
+                text.append("\n").append(Component.literal(met ? "\u2714 " : "\u2718 ")
+                        .withStyle(met ? ChatFormatting.GREEN : ChatFormatting.RED)
+                        .append(Component.translatable(pair.getFirst())
+                                .withStyle(met ? ChatFormatting.GREEN : ChatFormatting.RED)));
+            }
+        }
+        return text;
+    }
+
+    /**
+     * 点某个模式：以服务端为准。
+     *
+     * <p>客户端这份"能不能选"的判断不一定可靠：把精妙背包接进女仆物品栏的补丁只在服务端接
+     *（客户端那份是同步下来的影子，写进去会和真实数据打架），所以食物只在背包里时，
+     * 客户端会把"喂食"之类判定成选不了，服务端却能看见背包、条件其实满足。
+     * 因此点"选不了"的按钮不再直接吞掉，照样发包让服务端裁决——服务端会按真实状态重查，
+     * 不合格直接忽略这条消息；合格后任务写进实体数据同步回来，界面自己就更新了。
+     * 客户端判断能选时保留原本地秒切，手感与女仆首页一致。</p>
+     *
+     * <p>这条"照样发包"能走通，靠的是按钮用的是 {@link MaidSophTaskButton}：
+     * 女仆自己的 {@link TaskButton} 在 {@code mouseClicked} 里先按客户端算出的
+     * {@code enable} 拦一道，灰掉的按钮鼠标点下去什么都不发生，上面这套服务端裁决就
+     * 等于只对键盘玩家生效。换掉子类之后，灰化外观和条件说明照旧，但鼠标点了必然发包。</p>
+     *
+     * <p>还有一处必须说清楚：服务端裁决完不会回话（发的是女仆模组原版的
+     * {@code MaidTaskMessage}，它只负责"合格就切、不合格就忽略"）。所以如果连服务端也
+     * 认为条件不满足，玩家看到的就是"点下去没反应"。灰掉时悬停能看到缺哪几条条件，
+     * 这是目前唯一的解释渠道。</p>
+     */
+    private static void switchTask(EntityMaid maid, IMaidTask task, boolean enabled) {
+        if (maid.getTask() == task) {
+            return;
+        }
+        if (enabled) {
+            // 本地立刻切（服务端权威值随后同步回来，两边一致）
+            maid.setTask(task);
+        }
+        NetworkHandler.CHANNEL.sendToServer(new MaidTaskMessage(maid.getId(), task.getUid()));
+    }
 
     private StateSwitchingButton modeSwitch(int x, int y, int u, EntityMaid maid, Mode mode, String tooltipKey) {
         boolean initial = switch (mode) {
@@ -517,6 +672,11 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     @Override
     protected void renderBg(GuiGraphics graphics, float partialTicks, int mouseX, int mouseY) {
         graphics.blit(MAIN, leftPos, topPos, 0, 0, imageWidth, imageHeight);
+        // 工作模式列表：展开时垫在主界面左边外面（整块 92×251，和女仆首页同一张图）
+        if (MaidTaskListState.isOpen()) {
+            graphics.blit(TASK, leftPos + TASK_PANEL_X, topPos + TASK_PANEL_Y,
+                    0, 0, TASK_PANEL_W, TASK_PANEL_H);
+        }
 
         LivingEntity maid = menu.getMaid();
         if (maid != null) {
@@ -635,18 +795,18 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     private void drawLeftColumnInfo(GuiGraphics graphics, EntityMaid maid) {
         // 生命
         bar(graphics, 113, 0, 18, maid.getHealth() / Math.max(1.0F, maid.getMaxHealth()));
-        number(graphics, maid.getHealth(), 63, 114);
+        number(graphics, maid.getHealth(), leftPos + 63, topPos + 114);
         // 护甲
         double armor = Math.min(maid.getAttributeValue(Attributes.ARMOR) / 20.0, 1.0);
         bar(graphics, 124, 9, 23, armor);
-        number(graphics, maid.getArmorValue(), 63, 125);
+        number(graphics, maid.getArmorValue(), leftPos + 63, topPos + 125);
         // 经验
         int exp = maid.getExperience();
         bar(graphics, 135, 18, 28, (exp % 120) / 120.0);
-        number(graphics, exp / 120, 63, 136);
+        number(graphics, exp / 120, leftPos + 63, topPos + 136);
         // 好感度
         bar(graphics, 146, 27, 33, maid.getFavorabilityManager().getLevelPercent());
-        number(graphics, maid.getFavorabilityManager().getLevel(), 63, 147);
+        number(graphics, maid.getFavorabilityManager().getLevel(), leftPos + 63, topPos + 147);
         // 日程条背景（"WORK!" 那条）
         graphics.blit(SIDE, leftPos + 6, topPos + 178, 0, 47, 67, 25);
     }
@@ -660,6 +820,13 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
         }
     }
 
+    /**
+     * 画状态条右边那个小数字（半尺寸灰色），坐标和女仆首页 {@code drawNumberScale} 一样是<b>绝对坐标</b>。
+     *
+     * <p>这里必须传 {@code leftPos + x}：缩放是绕原点做的，画面整体先缩到一半、
+     * 再把坐标乘 2 抵消回来。之前传的是相对坐标（少了 leftPos/topPos），
+     * 数字就飘到界面左上角外面的世界上了。</p>
+     */
     private void number(GuiGraphics graphics, double value, int x, int y) {
         String text = formatScale((long) value);
         graphics.pose().pushPose();

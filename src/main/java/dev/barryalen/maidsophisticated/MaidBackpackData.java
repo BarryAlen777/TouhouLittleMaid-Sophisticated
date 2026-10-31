@@ -202,6 +202,12 @@ public class MaidBackpackData extends ItemStackHandler {
 
     @Override
     protected void onContentsChanged(int slot) {
+        // 这三格里的物品堆可能换了对象（换包 / 卸包 / 读档 / 收同步包），
+        // 女仆"可用物品栏"那份拼接结果缓存必须立刻作废，否则下一次读还是旧背包对象。
+        // 注意要写在 applyingRemote 提前返回之前：收网络包、反序列化同样改了这几格。
+        if (MaidSophisticated.touhouLittleMaidLoaded()) {
+            MaidBackpackInv.invalidate(owner);
+        }
         if (applyingRemote) {
             return;
         }

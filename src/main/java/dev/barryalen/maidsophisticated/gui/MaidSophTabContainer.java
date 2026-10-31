@@ -84,6 +84,13 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
     private final DataSlot contentSize = DataSlot.standalone();
     /** 搜索词（只存在服务端；客户端自己留着输入框里的文本）。 */
     private String search = "";
+    /**
+     * 没搜索时的窗口映射缓存，见 {@link #windowIndexes()}。
+     * 只跟格数有关：格数一变就重建，跟包里装了什么都无关，所以永远不会过期变脏。
+     */
+    @Nullable
+    private List<Integer> windowCache;
+    private int windowCacheSlots = -1;
     /** 上一帧内容指纹：背包被升级、漏斗、拾取这类外部途径改动时，靠它发现并重推整屏。 */
     private int lastContentHash;
     /**
@@ -220,30 +227,47 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
     /**
      * 当前窗口里的每一格对应背包内部第几格。
      * 没搜索时就是按顺序铺满（保留背包自己的格子布局）；搜索时只留匹配的物品、从前往后紧凑排。
+     *
+     * <p><b>返回的是只读列表，调用方不许改。</b>没搜索时结果会被复用：这方法被
+     * {@code BackpackContentSlot} 的每一格各调一次（{@code realIndexForSlot} → 这里），
+     * 一次整屏刷新就是四五十遍全背包扫描，不缓存的话每 tick 都有几十个 List 和上千次格子读取。</p>
+     *
+     * <p>只缓存"没搜索"这一种情况，因为它的答案只跟格数有关（就是 0,1,2,…,slots-1），
+     * 跟包里装了什么、这一 tick 变了什么都无关，永远不会脏。搜索开着时结果依赖物品内容，
+     * 整理/拾取/别的模组改包都会让旧答案失效，所以一律现算——搜索是低频操作，
+     * 多算几次也不心疼。</p>
      */
     public List<Integer> windowIndexes() {
         if (!MaidSophisticated.sophisticatedBackpacksLoaded()) {
             return Collections.emptyList();
         }
-        IItemHandlerModifiable handler = SbCompat.inventoryHandler(currentBackpack()).orElse(null);
+        IItemHandlerModifiable handler = SbCompat.guiInventoryHandler(currentBackpack()).orElse(null);
         if (handler == null) {
             return Collections.emptyList();
         }
         int slots = handler.getSlots();
-        List<Integer> out = new ArrayList<>(slots);
         if (search.isEmpty()) {
+            List<Integer> cached = windowCache;
+            if (cached != null && windowCacheSlots == slots) {
+                return cached;
+            }
+            List<Integer> out = new ArrayList<>(slots);
             for (int i = 0; i < slots; i++) {
                 out.add(i);
             }
-            return out;
+            List<Integer> result = Collections.unmodifiableList(out);
+            windowCache = result;
+            windowCacheSlots = slots;
+            return result;
         }
+        List<Integer> out = new ArrayList<>(slots);
         for (int i = 0; i < slots; i++) {
             ItemStack stack = handler.getStackInSlot(i);
             if (!stack.isEmpty() && matchesSearch(stack)) {
                 out.add(i);
             }
         }
-        return out;
+        return Collections.unmodifiableList(out);
     }
 
     /** 界面上第 local 个格子对应背包内部下标的第几格；无效返回 -1。 */
@@ -350,7 +374,7 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
         if (!MaidSophisticated.sophisticatedBackpacksLoaded()) {
             return;
         }
-        IItemHandlerModifiable handler = SbCompat.inventoryHandler(currentBackpack()).orElse(null);
+        IItemHandlerModifiable handler = SbCompat.guiInventoryHandler(currentBackpack()).orElse(null);
         if (handler == null) {
             return;
         }
@@ -530,7 +554,7 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
             scroll.set(maxScroll);
         }
         contentSize.set(window.size());
-        IItemHandlerModifiable handler = SbCompat.inventoryHandler(currentBackpack()).orElse(null);
+        IItemHandlerModifiable handler = SbCompat.guiInventoryHandler(currentBackpack()).orElse(null);
         int base = scroll.get() * COLS;
         List<ItemStack> stacks = new ArrayList<>(VISIBLE);
         for (int k = 0; k < VISIBLE; k++) {
@@ -640,7 +664,7 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
         if (!MaidSophisticated.sophisticatedBackpacksLoaded()) {
             return hash;
         }
-        IItemHandlerModifiable handler = SbCompat.inventoryHandler(currentBackpack()).orElse(null);
+        IItemHandlerModifiable handler = SbCompat.guiInventoryHandler(currentBackpack()).orElse(null);
         if (handler == null) {
             return hash;
         }
@@ -724,7 +748,9 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
             moved = moveItemStackTo(stack, BP_SLOT_BASE, CONTENT_BASE, false);
         }
         if (!moved && MaidSophisticated.sophisticatedBackpacksLoaded()) {
-            moved = SbCompat.insertAnywhere(currentBackpack(), stack);
+            // 走不带防吞护栏的那份视图：这是玩家亲手按的 shift，行为要和精妙背包
+            // 原生界面完全一致（装了虚空升级就照常销毁）。防吞护栏只管女仆自动拾取那条路。
+            moved = SbCompat.insertAnywhereGui(currentBackpack(), stack);
             if (moved) {
                 // 背包内部不是真的 Slot，原版差异同步要等下一 tick，
                 // 这里主动整屏推一次，物品才会立刻出现在格子里。
@@ -748,10 +774,13 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
 
     public static class MaidBackpackSlot extends SlotItemHandler {
         private final MaidSophTabContainer menu;
+        /** 这只女仆的背包数据本身：结算"三个槽全满"成就时要看另外两个槽。 */
+        private final MaidBackpackData handler;
 
         public MaidBackpackSlot(MaidSophTabContainer menu, MaidBackpackData handler, int index, int x, int y) {
             super(handler, index, x, y);
             this.menu = menu;
+            this.handler = handler;
         }
 
         @Override
@@ -769,8 +798,12 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
             boolean justEquipped = !stack.isEmpty() && MaidBackpackData.isSophisticatedBackpack(stack)
                     && getItem().isEmpty();
             super.set(stack);
-            if (justEquipped && !menu.viewerInventory.player.level().isClientSide) {
-                Events.creditFirstBackpack(menu.viewerInventory.player);
+            if (!menu.viewerInventory.player.level().isClientSide) {
+                if (justEquipped) {
+                    Events.creditFirstBackpack(menu.viewerInventory.player);
+                }
+                // 每格写入后都结算一次"三个槽全满"：成就只在首次达成时弹，重复结算无副作用
+                Events.creditAllBackpacks(menu.viewerInventory.player, handler);
             }
         }
 
@@ -779,8 +812,11 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
             boolean justEquipped = !stack.isEmpty() && MaidBackpackData.isSophisticatedBackpack(stack)
                     && getItem().isEmpty();
             super.setByPlayer(stack);
-            if (justEquipped && !menu.viewerInventory.player.level().isClientSide) {
-                Events.creditFirstBackpack(menu.viewerInventory.player);
+            if (!menu.viewerInventory.player.level().isClientSide) {
+                if (justEquipped) {
+                    Events.creditFirstBackpack(menu.viewerInventory.player);
+                }
+                Events.creditAllBackpacks(menu.viewerInventory.player, handler);
             }
         }
     }
@@ -806,7 +842,7 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
             if (!MaidSophisticated.sophisticatedBackpacksLoaded()) {
                 return null;
             }
-            return SbCompat.inventoryHandler(menu.currentBackpack()).orElse(null);
+            return SbCompat.guiInventoryHandler(menu.currentBackpack()).orElse(null);
         }
 
         @Override

@@ -10,7 +10,9 @@ authors="${mod_authors}"
 displayURL="https://github.com/BarryAlen777/TouhouLittleMaid-Sophisticated"
 logoFile="logo.png"
 description='''让车万女仆可以装备精妙背包：最多 3 个专属背包槽、背上按主背包渲染、
-女仆面板内直接查看/搜索/整理背包内容，拾取物品先进女仆栏再进精妙背包。
+女仆面板内直接查看/搜索/整理背包内容，还能在面板里直接换工作模式。
+背包里的东西她当自己的用：自己吃、喂你吃、喝药水、拿工具武器，
+其他按"女仆物品栏"找东西的附属模组（比如用法术卷轴的那些）也能直接用。
 需配合 1.20.1 的 Touhou Little Maid 与 Sophisticated Backpacks 使用（两个依赖缺席时安全跳过）。'''
 [[dependencies.${mod_id}]]
 modId="forge"

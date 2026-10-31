@@ -1,0 +1,24 @@
+{
+  "parent": "maid_sophisticated:first_maid_backpack",
+  "criteria": {
+    "all_maid_backpacks": {
+      "trigger": "maid_sophisticated:all_maid_backpacks"
+    }
+  },
+  "display": {
+    "icon": {
+      "item": "maid_sophisticated:maid_backpack_buckle"
+    },
+    "title": {
+      "translate": "advancement.maid_sophisticated.all_maid_backpacks.title"
+    },
+    "description": {
+      "translate": "advancement.maid_sophisticated.all_maid_backpacks.description"
+    },
+    "frame": "challenge",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "rewards": {}
+}

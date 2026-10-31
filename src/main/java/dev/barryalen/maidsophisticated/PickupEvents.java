@@ -61,6 +61,10 @@ public final class PickupEvents {
      * 连走都不走过去。这里补一刀：她自己装不下、但精妙背包还装得下时，
      * 直接把结论改成"能捡"（{@code setCanPickup(true)} 后取消事件），她就会正常走过去；
      * 真正弯腰捡的那一刻还会再经过这里（simulate=false），由我们把东西收进精妙背包。
+     *
+     * <p>"一次接通"补丁上线后，服务端她的可用物品栏本身就含精妙背包，
+     * 上面的判断女仆模组自己就能过，这条改判逻辑平时不会命中——留着是给
+     * 补丁失效（看门狗那条警告）时兜底，行为完全一致，不会重复收取。</p>
      */
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onMaidPickupItem(MaidPickupEvent.ItemResultPre event) {
@@ -107,9 +111,10 @@ public final class PickupEvents {
         if (!anySophCanAccept(data, stack)) {
             return;
         }
-        event.setCanPickup(true);
-        event.setCanceled(true);
-        // 真正收下：先女仆自己（能塞多少塞多少），剩下的进精妙背包
+        // 真正收下：先女仆自己（能塞多少塞多少），剩下的进精妙背包。
+        // 顺序刻意是"先收下、再决定要不要取消事件"：取消事件就等于由我们负责到底，
+        // 万一最后一格都没塞进去（例如背包装了虚空升级、被 SbCompat 的防吞护栏挡了），
+        // 我们既没改动任何东西，也就该原样把这次拾取交还给女仆模组自己判断。
         ItemStack remaining = TlmCompat.insertIntoMaidInventory(maid, stack.copy());
         for (int i = 0; i < MaidBackpackData.SLOTS && !remaining.isEmpty(); i++) {
             remaining = SbCompat.insertIntoBackpack(data.getStackInSlot(i), remaining);
@@ -118,6 +123,8 @@ public final class PickupEvents {
         if (taken <= 0) {
             return;
         }
+        event.setCanPickup(true);
+        event.setCanceled(true);
         // 和女仆自己弯腰捡一样先记一次拾取（经验/动画都按原版走），再处理掉落物
         maid.take(itemEntity, taken);
         if (remaining.isEmpty()) {

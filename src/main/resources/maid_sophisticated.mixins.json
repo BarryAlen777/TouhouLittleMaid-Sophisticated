@@ -1,0 +1,13 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "dev.barryalen.maidsophisticated.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "plugin": "dev.barryalen.maidsophisticated.mixin.MaidMixinPlugin",
+  "mixins": [
+    "EntityMaidInventoryMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

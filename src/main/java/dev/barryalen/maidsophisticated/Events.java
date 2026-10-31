@@ -1,5 +1,6 @@
 package dev.barryalen.maidsophisticated;
 
+import dev.barryalen.maidsophisticated.advancement.AllMaidBackpacksTrigger;
 import dev.barryalen.maidsophisticated.advancement.FirstMaidBackpackTrigger;
 
 import net.minecraft.network.chat.Component;
@@ -49,6 +50,24 @@ public final class Events {
     private static int tickCounter = 0;
     /** 快照刷新轮换的批数：15 批 × 40 tick = 600 tick（30 秒）存一圈。 */
     private static final int SAVE_BAND_COUNT = 15;
+
+    /**
+     * "补丁看门狗"：注入点用了 {@code require = 0}（宁可功能失效也不让玩家的存档崩），
+     * 代价是将来车万女仆改了那两个方法的名字/签名时，补丁会被静默跳过，谁也不吭声。
+     * 这里补一手：第一只女仆进世界后等一段时间，女仆 AI 迟早会读"可用物品栏"，
+     * {@link MaidBackpackInv#append} 就会留下痕迹；到点还没痕迹就说明补丁没接上，
+     * 往 latest.log 里记一条醒目警告，排查的人一搜就能看到。
+     *
+     * <p>为什么是 5 分钟而不是 1 分钟：她站着发呆的时候 AI 可以整整一分钟都不碰物品栏
+     * （附近没掉落物、当前任务也不需要看东西），1 分钟会把这种正常情况误报成补丁失效。</p>
+     */
+    private static final int HOOK_WATCH_DELAY = 6000;
+    /** 到点检查的 tick（第一只女仆进世界时排班；-1 = 没活）。 */
+    private static int hookCheckTick = -1;
+    /** 警告只记一次，别每 5 分钟刷屏。 */
+    private static boolean hookWarned = false;
+    /** "已经确认补丁真的拼上背包了"这件事只对外说一次。 */
+    private static boolean hookConfirmed = false;
 
     private Events() {}
 
@@ -108,6 +127,10 @@ public final class Events {
         ClientMaidIndex.track(event.getEntity());
         if (!(event.getLevel() instanceof ServerLevel serverLevel)) {
             return;
+        }
+        // 有女仆了才谈得上检查补丁有没有生效：给看门狗排个班（只排一次）
+        if (hookCheckTick < 0) {
+            hookCheckTick = tickCounter + HOOK_WATCH_DELAY;
         }
         MaidBackpackData.of(event.getEntity()).ifPresent(data -> {
             data.readFromEntity();
@@ -182,6 +205,11 @@ public final class Events {
         if (event.getLevel().isClientSide()) {
             MaidBackpackView.clearAll();
         }
+        // 精妙背包的护栏缓存按背包物品堆存（值是背包包装，会强引用实体数据）：
+        // 换世界不清，上一局的背包包装要等到被 LRU 淘汰才松手。
+        if (MaidSophisticated.sophisticatedBackpacksLoaded()) {
+            SbCompat.clearShieldCache();
+        }
     }
 
     /**
@@ -195,6 +223,78 @@ public final class Events {
         synchronized (TRACKED_MAIDS) {
             return new ArrayList<>(TRACKED_MAIDS);
         }
+    }
+
+    /**
+     * 看门狗到点检查，三种结果分开处理（每 5 分钟才走一次，成本可忽略）：
+     *
+     * <ol>
+     *   <li><b>真拼上了</b>（{@link MaidBackpackInv#hookMerged()}）—— 记一行 INFO 收工。
+     *       注意不能只看"补丁跑过"：跑过但每次都取不到背包，功能照样是坏的；</li>
+     *   <li><b>还没法判断</b> —— 场上没有女仆，或者没有一只女仆身上真带着精妙背包
+     *       （拼不上是应该的），改日再查，不报任何警告；</li>
+     *   <li><b>确实不对</b> —— 有带背包的女仆却始终没拼上，按"补丁没跑"和"跑了但拼不上"
+     *       两种情况分别给出可操作的 WARN（只报一次，不刷屏）。</li>
+     * </ol>
+     */
+    private static void checkHookWatchdog(boolean statePass) {
+        if (hookCheckTick < 0 || !statePass || tickCounter < hookCheckTick) {
+            return;
+        }
+        if (MaidBackpackInv.hookMerged()) {
+            hookCheckTick = -1;
+            if (!hookConfirmed) {
+                hookConfirmed = true;
+                MaidSophisticated.LOGGER.info(
+                        "可用物品栏补丁确认生效：女仆的 AI 已经能看到精妙背包里的 {} 格物品。",
+                        MaidBackpackInv.lastMergedSlots());
+            }
+            return;
+        }
+        if (trackedMaidsSnapshot().isEmpty()) {
+            hookCheckTick = tickCounter + HOOK_WATCH_DELAY; // 女仆们都没进世界，改日再查
+            return;
+        }
+        if (!anyTrackedMaidHasBackpack()) {
+            // 没有一只女仆身上有精妙背包：拼不上是正常现象，不该报故障，继续等
+            hookCheckTick = tickCounter + HOOK_WATCH_DELAY;
+            return;
+        }
+        hookCheckTick = -1;
+        if (hookWarned) {
+            return;
+        }
+        hookWarned = true;
+        // 措辞一律用"尚未观察到"，不用"没运行/没拼上"：这只女仆可能只是在挂机
+        // （附近没掉落物、当前任务也不碰物品栏），5 分钟没跑过是完全正常的。
+        // 日志不该用确定的口气去断言一件"还没看到"的事，否则排查的人会被自己误导。
+        if (MaidBackpackInv.hookRan()) {
+            MaidSophisticated.LOGGER.warn(
+                    "可用物品栏补丁跑起来了，但 5 分钟内尚未观察到它真的拼上任何一个精妙背包："
+                            + "注入点还在，疑似每次取背包内部物品栏都失败（多半是精妙背包这个版本"
+                            + "改了内部物品栏的取法）。请在本日志里搜 maid_sophisticated 的异常记录；"
+                            + "若那只女仆一直在挂机、附近也没有掉落物，这条可以先忽略。");
+        } else {
+            MaidSophisticated.LOGGER.warn(
+                    "5 分钟内尚未观察到可用物品栏补丁运行：车万女仆的 getAvailableInv(Z)/"
+                            + "getAvailableBackpackInv() 可能已在这个版本改名或改签名，"
+                            + "女仆将看不见精妙背包里的物品。请核对本模组与该版本女仆的兼容性；"
+                            + "若那只女仆一直在挂机、AI 没碰过物品栏，这条可以先忽略。");
+        }
+    }
+
+    /** 被跟踪的女仆里有没有哪一只确实带着精妙背包（看门狗用它区分"故障"和"本来就没包"）。 */
+    private static boolean anyTrackedMaidHasBackpack() {
+        for (LivingEntity maid : trackedMaidsSnapshot()) {
+            if (maid.isRemoved()) {
+                continue;
+            }
+            MaidBackpackData data = MaidBackpackData.of(maid).orElse(null);
+            if (data != null && !MaidBackpackData.isEmptyHandler(data)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -229,6 +329,10 @@ public final class Events {
         // 快照集虽然会随 GC 变空，但关服是清空它的最佳时机。
         synchronized (TRACKED_MAIDS) {
             TRACKED_MAIDS.clear();
+        }
+        // 同理清掉精妙背包那层护栏缓存里的背包包装
+        if (MaidSophisticated.sophisticatedBackpacksLoaded()) {
+            SbCompat.clearShieldCache();
         }
     }
 
@@ -361,6 +465,8 @@ public final class Events {
                 held.shrink(1);
                 playEquipFeedback(maid);
                 creditFirstBackpack(player);
+                // 第三个槽也放进去时，顺带结算"三个槽全满"的成就
+                creditAllBackpacks(player, data);
                 event.setCanceled(true);
                 event.setCancellationResult(InteractionResult.SUCCESS);
             }
@@ -409,6 +515,8 @@ public final class Events {
         if (!TlmCompat.loaded() || !MaidSophisticated.sophisticatedBackpacksLoaded()) {
             return;
         }
+        // 看门狗到点：确认"可用物品栏补丁"到底有没有真的把背包拼上去（详见下面这个方法）
+        checkHookWatchdog(statePass);
         // 快照刷新按 15 批轮换：每次 statePass 只存 1/15 的女仆，一轮 15×40 = 600 tick 转完。
         int saveBand = (tickCounter / 40) % SAVE_BAND_COUNT;
         for (LivingEntity maid : trackedMaidsSnapshot()) {
@@ -557,5 +665,29 @@ public final class Events {
         if (actor instanceof ServerPlayer player && MaidSophisticated.sophisticatedBackpacksLoaded()) {
             FirstMaidBackpackTrigger.INSTANCE.trigger(player);
         }
+    }
+
+    /**
+     * 女仆三个专属背包槽全部装满精妙背包 → 弹成就"我什么都不缺了"。
+     *
+     * <p>调用点只在"往槽里放东西之后"，所以拆包、换包都不会误触发；
+     * 成就本身按原版语义每个玩家只发放一次，之后拆装多少次都不会再弹。</p>
+     *
+     * @param actor 这次放包的人（服务端玩家）；不是玩家（比如自动化模组）就不发
+     * @param data  被放包的那只女仆的背包数据
+     */
+    public static void creditAllBackpacks(@Nullable net.minecraft.world.entity.Entity actor,
+                                          @Nullable MaidBackpackData data) {
+        if (!(actor instanceof ServerPlayer player) || data == null
+                || !MaidSophisticated.sophisticatedBackpacksLoaded()) {
+            return;
+        }
+        for (int i = 0; i < MaidBackpackData.SLOTS; i++) {
+            // isSophisticatedBackpack 对空格子返回 false，正好一并把"有空槽"挡掉
+            if (!MaidBackpackData.isSophisticatedBackpack(data.getStackInSlot(i))) {
+                return;
+            }
+        }
+        AllMaidBackpacksTrigger.INSTANCE.trigger(player);
     }
 }

@@ -1,5 +1,6 @@
 package dev.barryalen.maidsophisticated;
 
+import dev.barryalen.maidsophisticated.advancement.AllMaidBackpacksTrigger;
 import dev.barryalen.maidsophisticated.advancement.FirstMaidBackpackTrigger;
 import net.minecraft.advancements.CriteriaTriggers;
 import net.minecraft.world.item.Item;
@@ -59,17 +60,37 @@ public final class MaidSophisticated {
 
     private void commonSetup(FMLCommonSetupEvent event) {
         event.enqueueWork(() -> {
-            // 自定义进度触发器："这就很妙"
+            // 自定义进度触发器："这就很妙"（第一个背包）与"我什么都不缺了"（三个槽全满）
             CriteriaTriggers.register(FirstMaidBackpackTrigger.INSTANCE);
+            CriteriaTriggers.register(AllMaidBackpacksTrigger.INSTANCE);
             ModNetwork.register();
         });
     }
 
+    /**
+     * 模组在场与否运行期永远不会变，查一次存下来。
+     *
+     * <p>{@code sophisticatedBackpacksLoaded()} 会被 {@link MaidBackpackInv#of} 用到，
+     * 而后者跟着女仆 AI 每 tick 跑好几遍——每次都去翻模组列表纯属浪费。</p>
+     */
+    private static volatile Boolean sbLoadedCache;
+    private static volatile Boolean tlmLoadedCache;
+
     public static boolean sophisticatedBackpacksLoaded() {
-        return ModList.get().isLoaded(SB_MOD_ID);
+        Boolean cached = sbLoadedCache;
+        if (cached == null) {
+            cached = ModList.get().isLoaded(SB_MOD_ID);
+            sbLoadedCache = cached;
+        }
+        return cached;
     }
 
     public static boolean touhouLittleMaidLoaded() {
-        return ModList.get().isLoaded(TLM_MOD_ID);
+        Boolean cached = tlmLoadedCache;
+        if (cached == null) {
+            cached = ModList.get().isLoaded(TLM_MOD_ID);
+            tlmLoadedCache = cached;
+        }
+        return cached;
     }
 }

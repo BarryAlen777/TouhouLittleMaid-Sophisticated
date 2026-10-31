@@ -154,8 +154,12 @@ public final class TlmCompat {
     }
 
     /**
-     * 把物品塞进女仆自己的物品栏：先填她原有的格子，再填她背包扩容出来的格子。
-     * 走的是车万女仆自己的"可用物品栏"，和她自己捡东西的顺序完全一致。
+     * 把物品塞进女仆的"可用物品栏"：先填她原有的格子，再填她背包扩容出来的格子。
+     *
+     * <p>注意：自"一次接通"补丁上线后，{@code getAvailableInv} 的返回值在服务端已经
+     * 拼上了精妙背包（顺序：她的格子在前、背包在后）。所以这个方法在装了补丁的
+     * 服务端上实际是"先她自己、溢出进精妙背包"两级；名字里的"自己物品栏"要按这个理解。
+     * 精妙背包不在场 / 补丁未生效时，就退回只有她自己的格子——两种情况都安全。</p>
      */
     public static ItemStack insertIntoMaidInventory(LivingEntity entity, ItemStack stack) {
         if (stack.isEmpty() || !(entity instanceof EntityMaid maid)) {
@@ -165,7 +169,10 @@ public final class TlmCompat {
         return ItemHandlerHelper.insertItemStacked(inv, stack, false);
     }
 
-    /** 女仆自己的物品栏 + 她自己背包的格子里，还放得下这堆东西吗（只模拟，不动库存）。 */
+    /**
+     * 女仆的"可用物品栏"还放得下这堆东西吗（只模拟，不动库存）。
+     * 同 {@link #insertIntoMaidInventory}：服务端上这个视图含精妙背包，客户端副本不含。
+     */
     public static boolean canInsertIntoMaidInventory(LivingEntity entity, ItemStack stack) {
         if (stack.isEmpty() || !(entity instanceof EntityMaid maid)) {
             return false;
