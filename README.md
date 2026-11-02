@@ -43,3 +43,7 @@
 ## 🐛 问题反馈
 - 本附属模组产生的Bug，请提交本仓库 Issue。
 - 车万女仆本体、精妙背包原版的问题，请前往对应原作者仓库反馈。
+
+## 🔗 相关链接
+- [MC百科](https://www.mcmod.cn/class/32065.html)
+- [CurseForge](https://www.curseforge.com/minecraft/mc-mods/touhou-little-maid-sophisticated)
