@@ -25,6 +25,18 @@ public final class ClientMaidIndex {
         BY_UUID.remove(entity.getUUID());
     }
 
+    /**
+     * 客户端维度卸载 / 退出世界：整表清空。
+     *
+     * <p>不清的话，旧世界（或旧维度）那些没走到 {@code untrack} 的条目会一直留着。
+     * {@link #resolve} 会再核对一次 UUID，所以不会解析到错人，纯粹是内存小尾巴；
+     * 但客户端同一时刻只有一个 {@code ClientLevel}，清空后新世界 / 新维度的女仆
+     * 会在 {@code EntityJoinLevelEvent} 里重新登记，所以清空本身不会让谁查不到。
+     */
+    static void clear() {
+        BY_UUID.clear();
+    }
+
     /** 两侧通用：服务端走 ServerLevel 的 UUID 查询，客户端走索引。 */
     public static LivingEntity resolve(Level level, UUID uuid) {
         if (level instanceof ServerLevel serverLevel) {

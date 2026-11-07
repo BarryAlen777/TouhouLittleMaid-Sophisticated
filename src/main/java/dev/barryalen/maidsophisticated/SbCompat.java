@@ -1,16 +1,18 @@
 package dev.barryalen.maidsophisticated;
 
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.SimpleMenuProvider;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.common.util.LazyOptional;
-import net.minecraftforge.items.IItemHandlerModifiable;
-import net.minecraftforge.network.NetworkHooks;
+import net.neoforged.neoforge.items.IItemHandlerModifiable;
+import net.neoforged.neoforge.server.ServerLifecycleHooks;
+import net.p3pp3rf1y.sophisticatedbackpacks.backpack.wrapper.BackpackWrapper;
 import net.p3pp3rf1y.sophisticatedbackpacks.backpack.wrapper.IBackpackWrapper;
 import net.p3pp3rf1y.sophisticatedbackpacks.common.gui.BackpackContainer;
 import net.p3pp3rf1y.sophisticatedbackpacks.common.gui.BackpackContext;
 import net.p3pp3rf1y.sophisticatedbackpacks.util.PlayerInventoryProvider;
+import net.p3pp3rf1y.sophisticatedcore.init.ModCoreDataComponents;
 import net.p3pp3rf1y.sophisticatedcore.inventory.ITrackedContentsItemHandler;
 import net.p3pp3rf1y.sophisticatedcore.inventory.InventoryHandler;
 import net.p3pp3rf1y.sophisticatedcore.upgrades.IInsertResponseUpgrade;
@@ -26,7 +28,9 @@ import java.util.UUID;
  * 只有在确认 sophisticatedbackpacks 已安装时才会被类加载，避免 NoClassDefFoundError。
  *
  * <p>打开界面的方式与精妙背包自己（右键手持背包 / curios 槽点击）完全一致：
- * 构造 BackpackContext.Item(处理器名, 标识符, 槽位) 后走 NetworkHooks.openScreen，
+ * 构造 BackpackContext.Item(处理器名, 标识符, 槽位) 后走 openMenu，
+ * 并用 {@code context.toBuffer(buffer, player)} 写菜单附加数据（格式必须和读取端配对，见
+ * {@link #openBackpackGui}），
  * 因此物品页、升级页双页签、筛选、嵌套背包等所有原生功能直接可用。</p>
  *
  * <p><b>插入背包按调用者分两路：自动路径走 {@link #inventoryHandler(ItemStack)} 那层"防吞外壳"，
@@ -91,8 +95,9 @@ public final class SbCompat {
      * 无论调用方传的是什么对象都封得住。第三个参数 {@code true} 才是按<b>访问顺序</b>
      *（真 LRU：最久没被用过的最先淘汰）；{@code false} 是插入顺序，淘汰的就变成
      * "最早放进来"的那只背包，常驻的背包反而会被踢掉。过期项也不等被淘汰：
-     * {@link #shieldVoidInserts} 命中时顺手删掉已经陈旧的项，换世界时由
-     * {@link #clearShieldCache()} 整表清空，别让上一局的背包包装跟着进下一局。
+     * {@link #shieldVoidInserts} 命中时顺手删掉已经陈旧的项，关服时由
+     * {@link #clearCaches()} 整表清空。切维度 / 退世界时刻意不清：清掉会让服务端
+     * 正在开的原生界面下一秒自查到"包装换了"而被踢掉（见 {@code Events#onLevelUnload}）。
      */
     private static final java.util.Map<ItemStack, Shield> SHIELDS =
             new java.util.LinkedHashMap<>(64, 0.75f, true) {
@@ -113,6 +118,34 @@ public final class SbCompat {
      */
     private static final java.util.concurrent.atomic.AtomicBoolean SHIELD_ERROR_LOGGED =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * "背包堆 → 背包包装"的身份缓存：同一只背包全模组只发一个 {@link IBackpackWrapper}。
+     *
+     * <p>以前每次 {@link #wrapperOf} 都现场 {@code BackpackWrapper.fromStack} 新建一个包装。
+     * 一个包装一套内部物品栏：原生界面打开时精妙自己持有它的一个包装，女仆自动拾取 /
+     * 取工具 / 页签渲染又各走各新建的包装，两份 {@code InventoryHandler} 对着同一份背包
+     * 存档各读各写——原生界面每 tick 都要自查"存储物品有没有被动过手脚"，包装来回变
+     * 就是它把界面一脚踢掉的最直接嫌疑。共享之后自动路径和界面看到的是同一套内部物品栏：
+     * 拾进去的东西立刻出现在打开的界面上，两边也不会再互相踩。</p>
+     *
+     * <p>键仍是 ItemStack 的对象身份（同 {@link #SHIELD} 那套理由，两侧的堆对象天然不同，
+     * 不会互相覆盖），容量上限 + LRU 淘汰，关服时由 {@link #clearCaches()} 整表清空。
+     * 堆被换掉时旧项永远命中不上，会被新项自然挤出去——行为是对的，只是晚一点。</p>
+     */
+    private static final java.util.Map<ItemStack, IBackpackWrapper> WRAPPERS =
+            new java.util.LinkedHashMap<>(64, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<ItemStack, IBackpackWrapper> eldest) {
+                    return size() > SHIELD_CACHE_LIMIT;
+                }
+            };
+
+    /** 现在有哪些玩家开着女仆背包的精妙原生界面：玩家 UUID → 他在看谁的哪一格。 */
+    private static final java.util.Map<UUID, NativeOpen> NATIVE_OPEN = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 一次原生界面的打开记录：玩家、目标女仆、目标槽位、菜单窗口号（用来识别这条记录是否还作数）。 */
+    private record NativeOpen(UUID playerId, UUID maidId, int slot, int windowId) {}
 
     private SbCompat() {}
 
@@ -169,11 +202,27 @@ public final class SbCompat {
         if (stack.isEmpty()) {
             return;
         }
-        BackpackContext.Item context = new BackpackContext.Item(HANDLER_NAME, maid.getUUID().toString(), slot, false);
-        NetworkHooks.openScreen(player,
+        // 把共享包装预填进精妙自己的缓存字段（backpackWrapper），让原生界面直接用我们这份——
+        // 它每 tick 自查"存储物品是否被动过"的方式是拿 上下文.getBackpackWrapper() 和建窗时那份
+        // 比对象引用；不预填的话建窗时精妙现场又新建一个，跟我们这边自动路径用的就是两套内部
+        // 物品栏，同写一份背包存档。"联动存储"背包例外：那种包装必须由精妙的解析器创建，不预填。
+        IBackpackWrapper shared = isLinkedStorage(stack) ? null : wrapperOf(stack);
+        MaidBackpackContext context = new MaidBackpackContext(
+                maid.getUUID().toString(), slot, maid.getUUID(), shared);
+        // 写入必须走 context.toBuffer(buffer, player)，和精妙背包自己的 BackpackItem#use 完全同款：
+        // 它在最前面写 2 字节的 ContextType、最后写联动存储快照的标记位，客户端
+        // BackpackContext#fromBuffer 严格按这个格式读。之前只写 addToBuffer 的裸三个字段，
+        // 客户端把开头的长度字节 13 和 'm' 当成类型读掉后错位，再拿下一个字节 'a'(0x61=97)
+        // 当字符串长度，剩下只有 53 字节，直接 DecoderException("expected 97, but got 53") 断线。
+        player.openMenu(
                 new SimpleMenuProvider((windowId, playerInventory, menuPlayer) ->
                         new BackpackContainer(windowId, menuPlayer, context), context.getDisplayName(player)),
                 buffer -> context.toBuffer(buffer, player));
+        // 记下"这个玩家正在看这只背包"：窗口号拿刚开出来的菜单的；槽里堆对象之后在服务端
+        // 被换掉时（MaidBackpackData 的身份追踪会报过来），我们据此体面关窗并在日志里留痕。
+        NATIVE_OPEN.put(player.getUUID(),
+                new NativeOpen(player.getUUID(), context.maidId, context.maidSlot,
+                        player.containerMenu.containerId));
         // 原生界面构造时会懒生成 contentsUuid 等物品 NBT；立刻把快照刷新一次，
         // 免得实体保存时用的还是没有 uuid 的旧物品数据（重载后背包内容会"消失"）。
         MaidBackpackData.of(maid).ifPresent(MaidBackpackData::saveToEntity);
@@ -196,18 +245,22 @@ public final class SbCompat {
         if (backpackStack.isEmpty()) {
             return ItemStack.EMPTY;
         }
-        LazyOptional<IBackpackWrapper> wrapper = backpackStack.getCapability(
-                net.p3pp3rf1y.sophisticatedbackpacks.api.CapabilityBackpackWrapper.getCapabilityInstance());
-        return wrapper.map(w -> {
-            ITrackedContentsItemHandler inventory = w.getInventoryHandler();
+        IBackpackWrapper wrapper = wrapperOf(backpackStack);
+        if (wrapper == null) {
+            return ItemStack.EMPTY;
+        }
+        try {
+            ITrackedContentsItemHandler inventory = wrapper.getInventoryHandler();
             for (int i = 0; i < inventory.getSlots(); i++) {
                 ItemStack found = inventory.getStackInSlot(i);
                 if (Events.isToolOrWeapon(found)) {
                     return inventory.extractItem(i, 1, false);
                 }
             }
+        } catch (Exception | LinkageError t) {
             return ItemStack.EMPTY;
-        }).orElse(ItemStack.EMPTY);
+        }
+        return ItemStack.EMPTY;
     }
 
     /**
@@ -227,7 +280,6 @@ public final class SbCompat {
         }
         return Optional.ofNullable(shieldVoidInserts(wrapper, backpackStack));
     }
-
     /**
      * 拿当前背包内部物品栏（<b>不带任何护栏</b>），空包返回 empty。
      *
@@ -248,18 +300,43 @@ public final class SbCompat {
         }
     }
 
-    /** 物品堆 → 背包能力包装；不是背包、取不到能力都返回 null。 */
+    /**
+     * 物品堆 → 背包包装；不是背包、拿不到包装都返回 null（1.21.1 起走 BackpackWrapper.fromStack，能力入口已删）。
+     *
+     * <p>结果按堆的对象身份缓存，见 {@link #WRAPPERS}：自动路径和精妙原生界面共用一套
+     * 内部物品栏，谁也不跟谁抢着写背包存档。</p>
+     */
     private static IBackpackWrapper wrapperOf(ItemStack backpackStack) {
         if (backpackStack == null || backpackStack.isEmpty()) {
             return null;
         }
+        synchronized (WRAPPERS) {
+            IBackpackWrapper cached = WRAPPERS.get(backpackStack);
+            if (cached != null) {
+                return cached;
+            }
+        }
         try {
-            return backpackStack
-                    .getCapability(net.p3pp3rf1y.sophisticatedbackpacks.api.CapabilityBackpackWrapper
-                            .getCapabilityInstance())
-                    .orElse(null);
+            IBackpackWrapper wrapper = BackpackWrapper.fromStack(backpackStack);
+            // 不是真背包时 fromStack 给的是全局 Noop 单例，直接当"没有背包"处理（负结果不进缓存）
+            if (!wrapper.supportsBackpackContents()) {
+                return null;
+            }
+            synchronized (WRAPPERS) {
+                WRAPPERS.put(backpackStack, wrapper);
+            }
+            return wrapper;
         } catch (Exception | LinkageError t) {
             return null;
+        }
+    }
+
+    /** 这只堆是不是"联动存储"模式（跨背包联动那一套）；查不动时一律按"是"处理，让精妙自己的解析器接管。 */
+    private static boolean isLinkedStorage(ItemStack stack) {
+        try {
+            return stack.get(ModCoreDataComponents.LINKED_STORAGE_ENDPOINT.get()) != null;
+        } catch (Exception | LinkageError t) {
+            return true;
         }
     }
 
@@ -330,14 +407,67 @@ public final class SbCompat {
     }
 
     /**
-     * 清空护栏缓存。换世界 / 关服时由 {@code Events} 调用（调用方负责先确认精妙背包已加载）。
+     * 清空本类全部按堆身份缓存的表（护栏、背包包装、原生界面开窗登记）。
+     * 只在关服时由 {@code Events} 调用（调用方负责先确认精妙背包已加载）；
+     * 切维度 / 退世界不清，理由见 {@link #WRAPPERS} 的说明。
      *
      * <p>缓存键是背包物品堆、值是背包包装，两边都会强引用上一局的实体数据；
-     * 不清的话这些对象要等到被 LRU 淘汰才松手，单机反复进出存档就会攒一堆死引用。</p>
+     * 不清的话这些对象要等到被 LRU 淘汰才松手，单机反复进出存档就会攒一堆死引用。
+     * 原生界面开窗登记里的玩家 / 女仆更是直接挂着上一局服务端对象的引用。</p>
      */
-    public static void clearShieldCache() {
+    public static void clearCaches() {
         synchronized (SHIELDS) {
             SHIELDS.clear();
+        }
+        synchronized (WRAPPERS) {
+            WRAPPERS.clear();
+        }
+        NATIVE_OPEN.clear();
+    }
+
+    /**
+     * 服务端 {@link MaidBackpackData} 在换掉槽里的背包堆对象时打的招呼（仅服务端调用）。
+     *
+     * <p>背景：精妙背包的服务端菜单每一 tick 自查一次 {@code hasSomethingMessedWithStorage}——
+     * 它拿"当前槽里的堆"再解析一遍包装、和开窗时那份比<b>对象引用</b>，对不上就直接
+     * {@code closeContainer()}，日志里一声不吭。用户看到的"原生界面开两秒自己关了"，
+     * 根因就在这条自查：只要有人在我们没留神的地方把槽里的堆换掉，界面对象引用就断了。
+     * 与其让它去查，不如我们在换堆的那一现场合主动收尾：先关窗、并留下"谁换的"的日志栈，
+     * 这个类的所有缓存也顺带在这一处对齐。</p>
+     *
+     * <p>没开原生界面的槽位换堆是完全正常的操作（放包、取包），所以这里必须静默跳过，
+     * 只在"确实在看这一格"时才动作。</p>
+     */
+    public static void onServerBackpackStackReplaced(LivingEntity maid, int slot, String via) {
+        if (maid == null || maid.level() == null || maid.level().isClientSide) {
+            return;
+        }
+        MinecraftServer server = maid.level().getServer();
+        if (server == null) {
+            return;
+        }
+        for (NativeOpen open : List.copyOf(NATIVE_OPEN.values())) {
+            if (!open.maidId().equals(maid.getUUID()) || open.slot() != slot) {
+                continue;
+            }
+            ServerPlayer viewer = server.getPlayerList().getPlayer(open.playerId());
+            if (viewer == null || viewer.isRemoved()) {
+                NATIVE_OPEN.remove(open.playerId());
+                continue;
+            }
+            // 登记的窗口早就不作数了（玩家已经换了界面）：顺手清掉，不用等 Close 事件
+            if (!(viewer.containerMenu instanceof BackpackContainer container)
+                    || container.containerId != open.windowId()) {
+                NATIVE_OPEN.remove(open.playerId());
+                continue;
+            }
+            MaidSophisticated.LOGGER.warn(
+                    "女仆 {} 第 {} 格的精妙背包堆对象被换掉（途径：{}），玩家 {} 的原生界面按原样会被精妙的自查踢掉，这里主动体面关闭。",
+                    maid.getUUID(), slot, via, viewer.getName().getString(),
+                    // 带栈打印：下一次再出现"开两秒就关"，日志直接指出是哪条路在换堆对象
+                    new Throwable("stack-replaced-trace"));
+            viewer.closeContainer();
+            NATIVE_OPEN.remove(open.playerId());
         }
     }
 
@@ -498,5 +628,35 @@ public final class SbCompat {
         return inventoryHandler(backpackStack)
                 .map(handler -> insertIntoAnySlot(handler, stack, true).getCount() < stack.getCount())
                 .orElse(false);
+    }
+
+    /**
+     * 精妙背包"槽位里的背包"上下文 + 两件事：
+     * <ol>
+     *   <li>构造时把我们的共享包装预填进父类的 {@code backpackWrapper} 缓存字段。
+     *       父类 {@code getBackpackWrapper} 的复用条件是"缓存非空 且 缓存持有的堆对象
+     *       与当前槽里的同一个 且 不是联动存储包装"——预填后这三条都成立，
+     *       精妙的菜单每 tick 的自查拿到的就是我们那份包装，对象引用恒等，不会踢窗；
+     *       自动拾取和界面读写的是同一套内部物品栏，也不会互相踩存档。</li>
+     *   <li>带上女仆 UUID / 槽位号，开窗登记 {@link #NATIVE_OPEN} 时直接用（不用再去拆 identifier 字符串）。</li>
+     * </ol>
+     *
+     * <p>序列化 {@code toBuffer/addToBuffer} 原样继承父类：读端按 ContextType.ITEM 建的是
+     * 普通 {@code BackpackContext.Item}，客户端没有我们的预填包装（也不需要——客户端那份
+     * 菜单不跑 hasSomethingMessedWithStorage 自查，它有 {@code isClientSide} 短路）。</p>
+     */
+    private static final class MaidBackpackContext extends BackpackContext.Item {
+        private final UUID maidId;
+        private final int maidSlot;
+
+        MaidBackpackContext(String identifier, int slot, UUID maidId,
+                            @javax.annotation.Nullable IBackpackWrapper sharedWrapper) {
+            super(HANDLER_NAME, identifier, slot, false);
+            this.maidId = maidId;
+            this.maidSlot = slot;
+            if (sharedWrapper != null) {
+                this.backpackWrapper = sharedWrapper;
+            }
+        }
     }
 }

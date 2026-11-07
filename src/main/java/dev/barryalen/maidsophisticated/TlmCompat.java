@@ -14,12 +14,11 @@ import net.minecraft.world.inventory.MenuType;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
-import net.minecraftforge.common.extensions.IForgeMenuType;
-import net.minecraftforge.fml.ModList;
-import net.minecraftforge.items.IItemHandler;
-import net.minecraftforge.items.ItemHandlerHelper;
-import net.minecraftforge.network.NetworkHooks;
-import net.minecraftforge.registries.RegistryObject;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.common.extensions.IMenuTypeExtension;
+import net.neoforged.fml.ModList;
+import net.neoforged.neoforge.items.IItemHandler;
+import net.neoforged.neoforge.items.ItemHandlerHelper;
 
 /**
  * 与车万女仆的全部耦合都集中在这个类。
@@ -45,10 +44,9 @@ public final class TlmCompat {
         return entity instanceof EntityMaid;
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
     public static void registerMenu() {
-        ModMenus.MAID_SOPH_TAB = (RegistryObject) ModMenus.MENUS.register("maid_soph_tab",
-                () -> IForgeMenuType.create(MaidSophTabContainer::new));
+        ModMenus.MAID_SOPH_TAB = ModMenus.MENUS.register("maid_soph_tab",
+                () -> IMenuTypeExtension.create(MaidSophTabContainer::new));
     }
 
     // ---------- 女仆自己的背包 ----------
@@ -143,7 +141,7 @@ public final class TlmCompat {
         // 那样会把附魔、自定义名、容器内容全丢掉，依赖这条事件的模组拿到的是"同名白板物品"。
         ItemStack payload = stack.copy();
         payload.setCount(count);
-        net.minecraftforge.common.MinecraftForge.EVENT_BUS.post(
+        NeoForge.EVENT_BUS.post(
                 new com.github.tartaricacid.touhoulittlemaid.api.event.MaidPickupEvent.ItemResultPost(maid, payload));
     }
 
@@ -214,7 +212,7 @@ public final class TlmCompat {
         }
         // 打开前先把她的精妙背包状态推一份给这个玩家，界面上方的 3D 预览立刻就是对的
         MaidBackpackData.of(maid).ifPresent(data -> ModNetwork.syncMaidBackpackTo(player, maid, data));
-        NetworkHooks.openScreen(player,
+        player.openMenu(
                 new SimpleMenuProvider((windowId, inventory, menuPlayer) ->
                         new MaidSophTabContainer(windowId, inventory, maid.getId()),
                         Component.translatable("gui." + MaidSophisticated.MOD_ID + ".tab")),

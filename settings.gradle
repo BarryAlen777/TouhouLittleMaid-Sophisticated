@@ -1,4 +1,4 @@
 pluginManagement {
-    repositories { gradlePluginPortal(); maven { url = 'https://maven.minecraftforge.net/' }; mavenCentral() }
+    repositories { gradlePluginPortal(); mavenCentral() }
 }
-rootProject.name = 'blockforge-generated'
+rootProject.name = 'maid-sophisticated'

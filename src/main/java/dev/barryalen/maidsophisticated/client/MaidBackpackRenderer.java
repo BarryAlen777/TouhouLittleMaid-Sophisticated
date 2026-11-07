@@ -15,11 +15,11 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
-import net.minecraftforge.client.event.RenderLivingEvent;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.api.distmarker.OnlyIn;
+import net.neoforged.neoforge.client.event.RenderFrameEvent;
+import net.neoforged.neoforge.client.event.RenderLivingEvent;
+import net.neoforged.bus.api.SubscribeEvent;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -108,19 +108,20 @@ public final class MaidBackpackRenderer {
         }
     }
 
-    /** 帧首兜底换好、帧末（世界 + 界面都画完）全部还原。 */
+    /** 帧首兜底换好、帧末（世界 + 界面都画完）全部还原（NeoForge 用每帧事件替代旧的 RenderTickEvent 相位）。 */
     @SubscribeEvent
-    public static void onRenderTick(TickEvent.RenderTickEvent event) {
-        if (event.phase == TickEvent.Phase.START) {
-            applyForWholeFrame();
-        } else {
-            restoreAll();
-        }
+    public static void onRenderFramePre(RenderFrameEvent.Pre event) {
+        applyForWholeFrame();
+    }
+
+    @SubscribeEvent
+    public static void onRenderFramePost(RenderFrameEvent.Post event) {
+        restoreAll();
     }
 
     /** 退出世界 / 切维度：临时状态按实体 id 存着，必须清掉，免得串到下一个世界。 */
     @SubscribeEvent
-    public static void onLevelUnload(net.minecraftforge.event.level.LevelEvent.Unload event) {
+    public static void onLevelUnload(net.neoforged.neoforge.event.level.LevelEvent.Unload event) {
         if (event.getLevel().isClientSide()) {
             reset();
         }
@@ -128,7 +129,7 @@ public final class MaidBackpackRenderer {
 
     /** 女仆离场就把她的"补发状态包"节流记录丢掉：长局里这张表只进不出的小毛病顺手修掉。 */
     @SubscribeEvent
-    public static void onEntityLeave(net.minecraftforge.event.entity.EntityLeaveLevelEvent event) {
+    public static void onEntityLeave(net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent event) {
         if (event.getLevel().isClientSide()) {
             LAST_REQUEST.remove(event.getEntity().getId());
         }
@@ -150,27 +151,27 @@ public final class MaidBackpackRenderer {
             return;
         }
 
-        ItemStack top = topBackpack(maid);
-        if (top.isEmpty()) {
+        Display display = resolveDisplay(maid);
+        if (display.top().isEmpty()) {
             // 数据没到：请服务端补发一次（节流），这一帧保持她原本的样子
             requestState(maid);
             return;
         }
-        if (!shouldShowSophisticated(maid)) {
+        if (!display.showSophisticated()) {
             // 她自己的背包优先（面板里"主背包显示"选了女仆背包）
             return;
         }
 
         // 记下她真正的类型，别的地方（界面按钮等）还要问
         MaidBackpackLook.record(maid, maid.getMaidBackpackType());
-        maid.setMaidBackpackType(SophMaidBackpack.forStack(top));
+        maid.setMaidBackpackType(SophMaidBackpack.forStack(display.top()));
         SWAPPED.add(maid.getId());
 
         if (!loggedDecision) {
             loggedDecision = true;
             MaidSophisticated.LOGGER.info(
                     "Maid backpack appearance -> sophisticated: {} on maid {}",
-                    top.getItem(), maid.getId());
+                    display.top().getItem(), maid.getId());
         }
     }
 
@@ -196,32 +197,40 @@ public final class MaidBackpackRenderer {
     // ---------- 状态判定 ----------
 
     /**
-     * 背上该不该显示精妙背包：
-     * 女仆没装她自己的背包 → 一律显示精妙背包；
-     * 两种都有 → 听面板里"主背包显示"那个开关。
+     * 一只女仆这一帧的背包展示状态：背上该画哪个包、该不该画精妙背包。
+     *
+     * <p>数据优先取 {@link MaidBackpackView}（服务端同步来的缓存）；还没有缓存时
+     * 退回查实体能力。能力查询要进 MaidCaps 的同步身份表，代价不小，
+     * 所以一只女仆一帧最多查这一遍，取 top 和取开关共用同一份结果
+     * （旧版两个方法各查各的，帧首兜底扫描一屋子女仆时锁要抢好几轮）。</p>
      */
-    private static boolean shouldShowSophisticated(EntityMaid maid) {
+    private record Display(ItemStack top, boolean showSophisticated) {}
+
+    /** 没有任何数据源（视图缓存和能力都没有）：这一帧什么都不换，去要一份状态。 */
+    private static final Display NONE = new Display(ItemStack.EMPTY, false);
+
+    private static Display resolveDisplay(EntityMaid maid) {
         MaidBackpackView.Entry view = MaidBackpackView.get(maid.getId());
+        ItemStack top;
         boolean showFlag;
         if (view != null) {
+            top = view.top();
             showFlag = view.showSophisticated();
         } else {
             MaidBackpackData data = MaidBackpackData.of(maid).orElse(null);
             if (data == null) {
-                return !TlmCompat.hasOwnBackpack(maid);
+                // 两边都没有：这一帧沿用她自己的背包，并向服务端要一次状态
+                return NONE;
             }
+            top = data.topBackpack();
             showFlag = data.isShowSophisticated();
         }
-        return !TlmCompat.hasOwnBackpack(maid) || showFlag;
-    }
-
-    /** 这一帧该显示的精妙背包（最靠近后背的那个槽）。 */
-    private static ItemStack topBackpack(EntityMaid maid) {
-        MaidBackpackView.Entry view = MaidBackpackView.get(maid.getId());
-        if (view != null) {
-            return view.top();
+        if (top.isEmpty()) {
+            return new Display(ItemStack.EMPTY, showFlag);
         }
-        return MaidBackpackData.of(maid).map(MaidBackpackData::topBackpack).orElse(ItemStack.EMPTY);
+        // 女仆没装她自己的背包 → 一律显示精妙背包；两种都有 → 听面板里"主背包显示"那个开关
+        boolean show = !TlmCompat.hasOwnBackpack(maid) || showFlag;
+        return new Display(top, show);
     }
 
     public static ItemStack backpackToShow(EntityMaid maid) {
@@ -230,11 +239,8 @@ public final class MaidBackpackRenderer {
                 || maid.isInvisible() || !maid.getConfigManager().isShowBackpack()) {
             return ItemStack.EMPTY;
         }
-        ItemStack top = topBackpack(maid);
-        if (top.isEmpty() || !shouldShowSophisticated(maid)) {
-            return ItemStack.EMPTY;
-        }
-        return top;
+        Display display = resolveDisplay(maid);
+        return display.top().isEmpty() || !display.showSophisticated() ? ItemStack.EMPTY : display.top();
     }
 
     /** 客户端还没拿到这只女仆的背包状态时，主动请服务端补一份（每只女仆最快 2 秒一次）。 */

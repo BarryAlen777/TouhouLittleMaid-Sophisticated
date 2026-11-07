@@ -2,7 +2,7 @@
   "required": false,
   "minVersion": "0.8",
   "package": "dev.barryalen.maidsophisticated.mixin",
-  "compatibilityLevel": "JAVA_17",
+  "compatibilityLevel": "JAVA_21",
   "plugin": "dev.barryalen.maidsophisticated.mixin.MaidMixinPlugin",
   "mixins": [
     "EntityMaidInventoryMixin"

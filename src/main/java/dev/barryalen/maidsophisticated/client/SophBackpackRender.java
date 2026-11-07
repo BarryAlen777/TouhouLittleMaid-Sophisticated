@@ -6,10 +6,10 @@ import com.mojang.math.Axis;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.entity.LivingEntityRenderer;
+import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
-import net.p3pp3rf1y.sophisticatedbackpacks.client.ClientEventHandler;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.api.distmarker.OnlyIn;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -78,6 +78,29 @@ public final class SophBackpackRender {
 
     private SophBackpackRender() {}
 
+    /**
+     * 精妙背包"背上"这个显示情境（NeoForge 枚举扩展项，SB 内部叫 {@code SOPHISTICATEDBACKPACKS_WORN}）。
+     *
+     * <p>旧版它挂在 {@code ClientEventHandler.WORN}（包级私有），1.21.1 那个字段没了，
+     * SB 自己改用枚举扩展注册。这里按扩展名解析一次缓存下来；万一拿不到（理论不会）退回
+     * {@code HEAD}，至少还能画出来，不会空指针崩客户端。</p>
+     */
+    private static ItemDisplayContext worn;
+
+    private static ItemDisplayContext wornContext() {
+        ItemDisplayContext local = worn;
+        if (local != null) {
+            return local;
+        }
+        try {
+            local = ItemDisplayContext.valueOf("SOPHISTICATEDBACKPACKS_WORN");
+        } catch (IllegalArgumentException | LinkageError t) {
+            local = ItemDisplayContext.HEAD;
+        }
+        worn = local;
+        return local;
+    }
+
     public static void drawItem(EntityMaid maid, ItemStack stack, PoseStack poseStack,
                                 MultiBufferSource buffer, int packedLight, int packedOverlay,
                                 boolean yFlippedSpace) {
@@ -108,7 +131,7 @@ public final class SophBackpackRender {
             }
             mc.getItemRenderer().renderStatic(
                     stack,
-                    ClientEventHandler.WORN,
+                    wornContext(),
                     packedLight,
                     overlay,
                     poseStack,

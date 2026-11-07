@@ -10,7 +10,6 @@
   "gui.maid_sophisticated.next": "Next backpack",
   "gui.maid_sophisticated.open_native": "Open native Sophisticated GUI",
   "gui.maid_sophisticated.schedule.desc": "Click to switch schedule: all day / day / night",
-  "gui.maid_sophisticated.task_list.tip": "Work mode: click to open or close the mode list on the left",
   "gui.maid_sophisticated.task_list.prev_page": "Previous page of work modes",
   "gui.maid_sophisticated.task_list.next_page": "Next page of work modes",
   "gui.maid_sophisticated.task_list.close": "Close the work mode list",

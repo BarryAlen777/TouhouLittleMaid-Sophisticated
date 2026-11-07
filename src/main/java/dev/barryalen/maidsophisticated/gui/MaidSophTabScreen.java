@@ -6,6 +6,7 @@ import com.github.tartaricacid.touhoulittlemaid.client.gui.entity.cache.CacheIco
 import com.github.tartaricacid.touhoulittlemaid.client.gui.sound.MaidSoundPackGui;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.MaidDownloadButton;
 import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.TaskButton;
+import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.TouhouStateSwitchButton;
 import com.github.tartaricacid.touhoulittlemaid.client.resource.CustomPackLoader;
 import com.github.tartaricacid.touhoulittlemaid.compat.ysm.YsmCompat;
 import com.github.tartaricacid.touhoulittlemaid.compat.ysm.event.OpenYsmMaidScreenEvent;
@@ -14,10 +15,9 @@ import com.github.tartaricacid.touhoulittlemaid.entity.ai.brain.MaidSchedule;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.TabIndex;
 import com.github.tartaricacid.touhoulittlemaid.entity.task.TaskManager;
-import com.github.tartaricacid.touhoulittlemaid.network.NetworkHandler;
-import com.github.tartaricacid.touhoulittlemaid.network.message.MaidConfigMessage;
-import com.github.tartaricacid.touhoulittlemaid.network.message.MaidTaskMessage;
-import com.github.tartaricacid.touhoulittlemaid.network.message.ToggleTabMessage;
+import com.github.tartaricacid.touhoulittlemaid.network.message.MaidConfigPackage;
+import com.github.tartaricacid.touhoulittlemaid.network.message.MaidTaskPackage;
+import com.github.tartaricacid.touhoulittlemaid.network.message.ToggleTabPackage;
 import com.github.tartaricacid.touhoulittlemaid.util.GuiTools;
 import com.github.tartaricacid.touhoulittlemaid.util.ParseI18n;
 import dev.barryalen.maidsophisticated.MaidBackpackData;
@@ -34,8 +34,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
-import net.minecraft.client.gui.components.ImageButton;
-import net.minecraft.client.gui.components.StateSwitchingButton;
+import com.github.tartaricacid.touhoulittlemaid.client.gui.widget.button.TouhouImageButton;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
@@ -48,7 +47,8 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.common.MinecraftForge;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.text.DecimalFormat;
 import java.util.ArrayList;
@@ -65,21 +65,21 @@ import java.util.function.IntSupplier;
  */
 public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContainer> {
     private static final ResourceLocation MAIN =
-            new ResourceLocation("touhou_little_maid", "textures/gui/maid_gui_main.png");
+            ResourceLocation.fromNamespaceAndPath("touhou_little_maid", "textures/gui/maid_gui_main.png");
     private static final ResourceLocation BACKPACK =
-            new ResourceLocation("touhou_little_maid", "textures/gui/maid_gui_backpack.png");
+            ResourceLocation.fromNamespaceAndPath("touhou_little_maid", "textures/gui/maid_gui_backpack.png");
     private static final ResourceLocation SIDE =
-            new ResourceLocation("touhou_little_maid", "textures/gui/maid_gui_side.png");
+            ResourceLocation.fromNamespaceAndPath("touhou_little_maid", "textures/gui/maid_gui_side.png");
     private static final ResourceLocation BUTTON =
-            new ResourceLocation("touhou_little_maid", "textures/gui/maid_gui_button.png");
+            ResourceLocation.fromNamespaceAndPath("touhou_little_maid", "textures/gui/maid_gui_button.png");
     private static final ResourceLocation BUCKLE =
-            new ResourceLocation(MaidSophisticated.MOD_ID, "textures/item/maid_backpack_buckle.png");
+            ResourceLocation.fromNamespaceAndPath(MaidSophisticated.MOD_ID, "textures/item/maid_backpack_buckle.png");
     /** 精妙背包自己的图标表：搜索、整理、排序的图标直接借用，画风和原生界面一致。 */
     private static final ResourceLocation SB_ICONS =
-            new ResourceLocation("sophisticatedcore", "textures/gui/icons.png");
+            ResourceLocation.fromNamespaceAndPath("sophisticatedcore", "textures/gui/icons.png");
     /** 女仆自己的"工作模式列表"贴图：整块面板 + 翻页按钮 + 每个模式一行。 */
     private static final ResourceLocation TASK =
-            new ResourceLocation("touhou_little_maid", "textures/gui/maid_gui_task.png");
+            ResourceLocation.fromNamespaceAndPath("touhou_little_maid", "textures/gui/maid_gui_task.png");
 
     /**
      * 图标坐标全部照抄精妙背包自己的 {@code ButtonDefinitions}：
@@ -119,7 +119,7 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
 
     private boolean draggingScroll;
     /** 头像左上角那个"!"：悬停时列出女仆的详细信息（和女仆首页同一个按钮同一个提示）。 */
-    private ImageButton infoButton;
+    private TouhouImageButton infoButton;
     private EditBox searchBox;
     private boolean searchOpen;
     private String searchText = "";
@@ -144,9 +144,9 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
         }
         int id = maid.getId();
         // 顶部三个原版标签：点了切回女仆自己的对应页
-        addTab(94, 107, "main", b -> NetworkHandler.CHANNEL.sendToServer(new ToggleTabMessage(id, TabIndex.MAIN)));
-        addTab(119, 132, "task_config", b -> NetworkHandler.CHANNEL.sendToServer(new ToggleTabMessage(id, TabIndex.TASK_CONFIG)));
-        addTab(144, 157, "maid_config", b -> NetworkHandler.CHANNEL.sendToServer(new ToggleTabMessage(id, TabIndex.MAID_CONFIG)));
+        addTab(94, 107, "main", b -> PacketDistributor.sendToServer(new ToggleTabPackage(id, TabIndex.MAIN)));
+        addTab(119, 132, "task_config", b -> PacketDistributor.sendToServer(new ToggleTabPackage(id, TabIndex.TASK_CONFIG)));
+        addTab(144, 157, "maid_config", b -> PacketDistributor.sendToServer(new ToggleTabPackage(id, TabIndex.MAID_CONFIG)));
         // 第四个：当前页，按下不可点
         this.addRenderableWidget(new MaidSophTabButton(leftPos + 169, topPos + 5, true, b -> {}));
 
@@ -188,26 +188,26 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
      * 坐标用的是女仆首页原位（贴图 u/v 也照搬），所以两边看起来是同一个界面。
      */
     private void addPreviewButtons(EntityMaid maid) {
-        this.infoButton = new ImageButton(leftPos + 8, topPos + 14, 9, 9, 72, 65, 10, BUTTON,
+        this.infoButton = new TouhouImageButton(leftPos + 8, topPos + 14, 9, 9, 72, 65, 10, BUTTON,
                 GuiTools.NO_ACTION);
         this.addRenderableWidget(this.infoButton);
 
         // 装了 YSM 时女仆首页会把语音包按钮往左挪一格，给 YSM 皮肤按钮腾位置
         boolean ysm = YsmCompat.isInstalled();
         int soundX = ysm ? 42 : 52;
-        ImageButton sound = new ImageButton(leftPos + soundX, topPos + 14, 9, 9, 144, 43, 10, BUTTON,
+        TouhouImageButton sound = new TouhouImageButton(leftPos + soundX, topPos + 14, 9, 9, 144, 43, 10, BUTTON,
                 b -> Minecraft.getInstance().setScreen(new MaidSoundPackGui(maid)));
         sound.setTooltip(Tooltip.create(Component.translatable("gui.touhou_little_maid.button.sound")));
         this.addRenderableWidget(sound);
 
         if (ysm) {
-            ImageButton ysmSkin = new ImageButton(leftPos + 52, topPos + 14, 9, 9, 144, 65, 10, BUTTON,
-                    b -> MinecraftForge.EVENT_BUS.post(new OpenYsmMaidScreenEvent(maid)));
+            TouhouImageButton ysmSkin = new TouhouImageButton(leftPos + 52, topPos + 14, 9, 9, 144, 65, 10, BUTTON,
+                    b -> NeoForge.EVENT_BUS.post(new OpenYsmMaidScreenEvent(maid)));
             ysmSkin.setTooltip(Tooltip.create(Component.translatable("gui.touhou_little_maid.button.ysm_skin")));
             this.addRenderableWidget(ysmSkin);
         }
 
-        ImageButton skin = new ImageButton(leftPos + 62, topPos + 14, 9, 9, 72, 43, 10, BUTTON,
+        TouhouImageButton skin = new TouhouImageButton(leftPos + 62, topPos + 14, 9, 9, 72, 43, 10, BUTTON,
                 b -> CacheIconManager.openMaidModelGui(maid));
         skin.setTooltip(Tooltip.create(Component.translatable("gui.touhou_little_maid.button.skin")));
         this.addRenderableWidget(skin);
@@ -395,10 +395,11 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     private void addLeftColumnWidgets(EntityMaid maid) {
         // 当前工作模式按钮：本体那张 71×21 的长条，点一下在左边展开工作模式列表，
         // 和女仆首页的任务按钮完全同一套行为（贴图坐标都一样）。
-        ImageButton task = new ImageButton(leftPos + 4, topPos + 159, 71, 21, 0, 42, 22, BUTTON,
+        TouhouImageButton task = new TouhouImageButton(leftPos + 4, topPos + 159, 71, 21, 0, 42, 22, BUTTON,
                 b -> toggleTaskList());
-        task.setTooltip(Tooltip.create(Component.translatable(
-                "gui." + MaidSophisticated.MOD_ID + ".task_list.tip")));
+        // 悬停说明直接挂女仆自己那个键（原版显示"切换工作模式"），
+        // 两边同一个按钮同一个文案，不再自写一份。
+        task.setTooltip(Tooltip.create(Component.translatable("gui.touhou_little_maid.task.switch")));
         this.addRenderableWidget(task);
         // 日程条：点击循环 全天/白天/黑夜，和女仆首页一致
         this.addRenderableWidget(new SophScheduleButton(leftPos + 9, topPos + 187, maid));
@@ -484,7 +485,7 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     }
 
     private void addTaskPageButton(int x, int y, int w, int h, int u, String tooltipKey, Button.OnPress press) {
-        ImageButton button = new ImageButton(x, y, w, h, u, 0, 14, TASK, press);
+        TouhouImageButton button = new TouhouImageButton(x, y, w, h, u, 0, 14, TASK, press);
         button.setTooltip(Tooltip.create(Component.translatable(tooltipKey)));
         this.addRenderableWidget(button);
     }
@@ -499,7 +500,8 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
         }
         List<com.mojang.datafixers.util.Pair<String, java.util.function.Predicate<EntityMaid>>> hints =
                 new ArrayList<>();
-        if (MinecraftForge.EVENT_BUS.post(new MaidTaskEnableEvent(task, maid, hints))) {
+        // NeoForge 的 post 返回事件本身；被取消（别的模组禁止该模式）时返回的 event 需查 isCanceled
+        if (NeoForge.EVENT_BUS.post(new MaidTaskEnableEvent(task, maid, hints)).isCanceled()) {
             return false;
         }
         return task.isEnable(maid);
@@ -548,16 +550,18 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
             // 本地立刻切（服务端权威值随后同步回来，两边一致）
             maid.setTask(task);
         }
-        NetworkHandler.CHANNEL.sendToServer(new MaidTaskMessage(maid.getId(), task.getUid()));
+        PacketDistributor.sendToServer(new MaidTaskPackage(maid.getId(), task.getUid()));
     }
 
-    private StateSwitchingButton modeSwitch(int x, int y, int u, EntityMaid maid, Mode mode, String tooltipKey) {
+    private TouhouStateSwitchButton modeSwitch(int x, int y, int u, EntityMaid maid, Mode mode, String tooltipKey) {
         boolean initial = switch (mode) {
             case HOME -> maid.isHomeModeEnable();
             case PICKUP -> maid.isPickup();
             case RIDE -> maid.isRideable();
         };
-        StateSwitchingButton button = new StateSwitchingButton(x, y, 20, 20, initial) {
+        // 1.21.1 原版 StateSwitchingButton 改成了 WidgetSprites 精灵表，画不出这套 UV；
+        // 车万女仆自家保留了旧写法的 TouhouStateSwitchButton，UV 数值与女仆主界面完全一致
+        TouhouStateSwitchButton button = new TouhouStateSwitchButton(x, y, 20, 20, initial) {
             @Override
             public void onClick(double mouseX, double mouseY) {
                 this.isStateTriggered = !this.isStateTriggered;
@@ -565,7 +569,7 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
                 boolean home = mode == Mode.HOME ? this.isStateTriggered : maid.isHomeModeEnable();
                 boolean pick = mode == Mode.PICKUP ? this.isStateTriggered : maid.isPickup();
                 boolean ride = mode == Mode.RIDE ? this.isStateTriggered : maid.isRideable();
-                NetworkHandler.CHANNEL.sendToServer(new MaidConfigMessage(maid.getId(), home, pick, ride, maid.getSchedule()));
+                PacketDistributor.sendToServer(new MaidConfigPackage(maid.getId(), home, pick, ride, maid.getSchedule()));
             }
         };
         button.initTextureValues(u, 0, 21, 21, BUTTON);
@@ -599,7 +603,7 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
         public void onPress() {
             MaidSchedule[] values = MaidSchedule.values();
             this.mode = values[(this.mode.ordinal() + 1) % values.length];
-            NetworkHandler.CHANNEL.sendToServer(new MaidConfigMessage(maid.getId(),
+            PacketDistributor.sendToServer(new MaidConfigPackage(maid.getId(),
                     maid.isHomeModeEnable(), maid.isPickup(), maid.isRideable(), this.mode));
         }
 
@@ -629,9 +633,31 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
         this.addRenderableWidget(button);
     }
 
+    /**
+     * 工作模式列表顶上的页码（"1/2"）：原版女仆首页在 {@code AbstractMaidContainerGui#renderLabels}
+     * 里画，坐标是相对整个界面的 (-48, 12)（颜色 0x333333）。原版标签页有、我们这页没有，
+     * 就是之前"漏了东西"的那一格。这里照同一坐标补上，翻页按钮行就完整了。
+     *
+     * <p>{@code renderLabels} 是在原版 render 里 pushPose + translate(leftPos, topPos) 之后调的，
+     * 所以这里的坐标和原版一样直接用相对值。</p>
+     */
+    @Override
+    protected void renderLabels(GuiGraphics graphics, int mouseX, int mouseY) {
+        super.renderLabels(graphics, mouseX, mouseY);
+        if (!MaidTaskListState.isOpen() || !(menu.getMaid() instanceof EntityMaid maid)) {
+            return;
+        }
+        int taskCount = TaskManager.getNotHiddenTaskList(maid).size();
+        int pages = Math.max(1, (taskCount + TASKS_PER_PAGE - 1) / TASKS_PER_PAGE);
+        int page = Mth.clamp(MaidTaskListState.page(), 0, pages - 1) + 1;
+        graphics.drawString(this.font, page + "/" + pages, -48, 12, 0x333333, false);
+    }
+
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        this.renderBackground(graphics);
+        // 1.21.1：super.render（AbstractContainerScreen）内部已经会 renderBackground → renderBg，
+        // 这里绝不能再手动补一次——画两遍 = 每帧双份底图/3D 女仆预览，
+        // 快速点工作模式时文字闪、切到这一页时整屏跳，都是它造成的（见 GUI 闪烁审查报告）。
         super.render(graphics, mouseX, mouseY, partialTick);
         if (menu.getMaid() instanceof EntityMaid maid) {
             drawCurrentTaskText(graphics, maid);
@@ -686,8 +712,12 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
             // 跟着这次预览一起 flush，不会晚一帧、也不会闪。
             boolean pushed = SophBackpackRender.pushBuffers(graphics.bufferSource());
             try {
-                InventoryScreen.renderEntityInInventoryFollowsMouse(graphics, leftPos + 40, topPos + 100, 40,
-                        (leftPos + 40) - mouseX, (topPos + 50) - mouseY, maid);
+                // 坐标逐字照抄车万女仆原版 AbstractMaidContainerGui#drawMaidCharacter：
+                // 预览区域 (6,12)-(73,124)、yTranslate 40、scale 0.1，模型就落在左上黑框正中。
+                // 之前自算的 followsAngle 区域（y 从 100 起）画到了状态条一带，整个模型下沉错位。
+                InventoryScreen.renderEntityInInventoryFollowsMouse(graphics,
+                        leftPos + 6, topPos + 12, leftPos + 73, topPos + 124,
+                        40, 0.1F, mouseX, mouseY, maid);
             } finally {
                 if (pushed) {
                     SophBackpackRender.popBuffers();
@@ -947,12 +977,13 @@ public class MaidSophTabScreen extends AbstractContainerScreen<MaidSophTabContai
     }
 
     @Override
-    public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
-        if (delta != 0 && (isOverContent(mouseX, mouseY) || isOverScroll(mouseX, mouseY))) {
-            menu.clientScroll(menu.scrollRow() + (delta < 0 ? 1 : -1));
+    // 1.21.1：滚轮回调拆成 scrollX/scrollY 两个量（横向滚轮支持），纵向滚动对应原来的 delta
+    public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if (scrollY != 0 && (isOverContent(mouseX, mouseY) || isOverScroll(mouseX, mouseY))) {
+            menu.clientScroll(menu.scrollRow() + (scrollY < 0 ? 1 : -1));
             return true;
         }
-        return super.mouseScrolled(mouseX, mouseY, delta);
+        return super.mouseScrolled(mouseX, mouseY, scrollX, scrollY);
     }
 
     private void applyScrollFromMouse(double mouseY) {

@@ -6,7 +6,8 @@ import dev.barryalen.maidsophisticated.MaidSophisticated;
 import dev.barryalen.maidsophisticated.ModMenus;
 import dev.barryalen.maidsophisticated.ModNetwork;
 import dev.barryalen.maidsophisticated.SbCompat;
-import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.LivingEntity;
@@ -16,9 +17,8 @@ import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.DataSlot;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.items.IItemHandlerModifiable;
-import net.minecraftforge.items.SlotItemHandler;
-import net.minecraftforge.registries.ForgeRegistries;
+import net.neoforged.neoforge.items.IItemHandlerModifiable;
+import net.neoforged.neoforge.items.SlotItemHandler;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -27,6 +27,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 女仆 GUI"精妙背包"标签页的容器。
@@ -58,6 +59,11 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
     public static final int BP_Y = 35;
     /** 搜索词最长长度。 */
     private static final int MAX_SEARCH = 32;
+    /**
+     * "走了临时副本"的 WARN 只打第一次：能力注册失败时每次开页签都会走 fallback，
+     * 界面是玩家反复打开的，不夹一次就会刷屏（线索第一条已经够了）。
+     */
+    private static final AtomicBoolean FALLBACK_WARNED = new AtomicBoolean(false);
 
     /** 排序方式：名称 / 数量 / 分类（同模组的物品排在一起）。 */
     public enum SortMode {
@@ -112,7 +118,7 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
     /** 冷却窗口内收到过、还没落地的整理请求（方式本身已经记进 sortMode）。 */
     private boolean pendingSort;
 
-    public MaidSophTabContainer(int windowId, Inventory inventory, FriendlyByteBuf buf) {
+    public MaidSophTabContainer(int windowId, Inventory inventory, RegistryFriendlyByteBuf buf) {
         this(windowId, inventory, buf.readInt());
     }
 
@@ -124,8 +130,18 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
         this.maid = resolved != null && Events.isMaid(resolved) ? resolved : null;
         this.data = this.maid != null
                 ? MaidBackpackData.of(this.maid).orElseGet(() -> {
-                    // capability 极端情况下还没挂上（实体刚生成的一瞬间）：临时对象先读一份实体存档，
-                    // 不能拿一个全空的对象去接操作，否则一写就把她原来的背包数据覆盖没了。
+                    // capability 极端情况下还没挂上（实体刚生成的一瞬间、或女仆实体类型没注册成功）：
+                    // 临时对象先读一份实体存档，不能拿一个全空的对象去接操作，
+                    // 否则一写就把她原来的背包数据覆盖没了。
+                    // 这份临时数据不进 MaidCaps 缓存：只有这个界面看得到，AI/渲染仍会查不到——
+                    // 必须打 WARN 留线索，否则就是"背包明明存了但女仆装看不见"的无头悬案
+                    //（只打第一次，避免每次开界面刷一条）。
+                    if (FALLBACK_WARNED.compareAndSet(false, true)) {
+                        MaidSophisticated.LOGGER.warn(
+                                "打开女仆(id={})的精妙背包页时拿不到能力实例，本次改用临时副本（仅界面可见）。"
+                                + "若日志里还有 MaidCaps 注册失败的警告，请核对本模组与车万女仆的版本兼容性。",
+                                entityId);
+                    }
                     MaidBackpackData fallback = new MaidBackpackData(this.maid);
                     fallback.readFromEntity();
                     return fallback;
@@ -284,7 +300,7 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
         if (stack.getHoverName().getString().toLowerCase(Locale.ROOT).contains(search)) {
             return true;
         }
-        ResourceLocation key = ForgeRegistries.ITEMS.getKey(stack.getItem());
+        ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
         if (key == null) {
             return false;
         }
@@ -390,7 +406,7 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
                 if (remaining.isEmpty()) {
                     break;
                 }
-                if (ItemStack.isSameItemSameTags(existing, remaining)) {
+                if (ItemStack.isSameItemSameComponents(existing, remaining)) {
                     int space = Math.min(existing.getMaxStackSize(), remaining.getMaxStackSize()) - existing.getCount();
                     if (space > 0) {
                         int move = Math.min(space, remaining.getCount());
@@ -446,7 +462,7 @@ public class MaidSophTabContainer extends AbstractContainerMenu {
         Comparator<ItemStack> byName = Comparator.comparing(
                 stack -> stack.getHoverName().getString(), String.CASE_INSENSITIVE_ORDER);
         Comparator<ItemStack> byId = Comparator.comparing(stack -> {
-            ResourceLocation key = ForgeRegistries.ITEMS.getKey(stack.getItem());
+            ResourceLocation key = BuiltInRegistries.ITEM.getKey(stack.getItem());
             return key == null ? "" : key.toString();
         });
         return switch (mode) {

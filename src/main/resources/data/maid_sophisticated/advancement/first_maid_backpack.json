@@ -1,0 +1,25 @@
+{
+  "parent": "minecraft:story/root",
+  "criteria": {
+    "first_maid_backpack": {
+      "trigger": "maid_sophisticated:first_maid_backpack"
+    }
+  },
+  "display": {
+    "icon": {
+      "id": "maid_sophisticated:maid_backpack_buckle",
+      "count": 1
+    },
+    "title": {
+      "translate": "advancement.maid_sophisticated.first_maid_backpack.title"
+    },
+    "description": {
+      "translate": "advancement.maid_sophisticated.first_maid_backpack.description"
+    },
+    "frame": "task",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "rewards": {}
+}

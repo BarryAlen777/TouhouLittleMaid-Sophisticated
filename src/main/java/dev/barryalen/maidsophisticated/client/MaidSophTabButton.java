@@ -20,11 +20,11 @@ import java.util.List;
  */
 public class MaidSophTabButton extends Button implements ITooltipButton {
     private static final ResourceLocation SIDE =
-            new ResourceLocation("touhou_little_maid", "textures/gui/maid_gui_side.png");
+            ResourceLocation.fromNamespaceAndPath("touhou_little_maid", "textures/gui/maid_gui_side.png");
     /** 空白标签外形在 maid_gui_side.png 上的 UV x（前三个标签分别是 107/132/157）。 */
     private static final int TAB_U = 182;
     private static final ResourceLocation ICON =
-            new ResourceLocation(MaidSophisticated.MOD_ID, "textures/item/maid_backpack_buckle.png");
+            ResourceLocation.fromNamespaceAndPath(MaidSophisticated.MOD_ID, "textures/item/maid_backpack_buckle.png");
     private final List<Component> tooltips;
     private final boolean selected;
 

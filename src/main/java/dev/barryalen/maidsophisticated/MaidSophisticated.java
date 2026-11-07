@@ -2,17 +2,16 @@ package dev.barryalen.maidsophisticated;
 
 import dev.barryalen.maidsophisticated.advancement.AllMaidBackpacksTrigger;
 import dev.barryalen.maidsophisticated.advancement.FirstMaidBackpackTrigger;
-import net.minecraft.advancements.CriteriaTriggers;
+import net.minecraft.advancements.CriterionTrigger;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.world.item.Item;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.fml.ModList;
-import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
-import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
-import net.minecraftforge.registries.DeferredRegister;
-import net.minecraftforge.registries.ForgeRegistries;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.fml.ModList;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.registries.DeferredRegister;
 
 /**
  * Touhou Little Maid：Sophisticated（启动器显示名：车万女仆：这很精妙）模组入口。
@@ -33,11 +32,12 @@ public final class MaidSophisticated {
     public static final String SB_MOD_ID = "sophisticatedbackpacks";
     public static final String TLM_MOD_ID = "touhou_little_maid";
 
-    public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, MOD_ID);
+    public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(Registries.ITEM, MOD_ID);
+    /** 自定义进度触发器：NeoForge 1.21.1 起走注册表，不再运行期手动 register */
+    public static final DeferredRegister<CriterionTrigger<?>> TRIGGERS =
+            DeferredRegister.create(Registries.TRIGGER_TYPE, MOD_ID);
 
-    public MaidSophisticated() {
-        var bus = FMLJavaModLoadingContext.get().getModEventBus();
-
+    public MaidSophisticated(IEventBus bus) {
         // 触发各注册器类的静态初始化，把它们往 DeferredRegister 里塞的注册都建好
         ModItems.init();
         ModMenus.init();
@@ -45,26 +45,25 @@ public final class MaidSophisticated {
         ITEMS.register(bus);
         ModMenus.MENUS.register(bus);
 
+        // "这就很妙"（第一个背包）与"我什么都不缺了"（三个槽全满）两个自定义进度触发器
+        TRIGGERS.register("first_maid_backpack", () -> FirstMaidBackpackTrigger.INSTANCE);
+        TRIGGERS.register("all_maid_backpacks", () -> AllMaidBackpacksTrigger.INSTANCE);
+        TRIGGERS.register(bus);
+
         // 向精妙背包注册"女仆背包槽"处理器（只在精妙背包在场时）
         if (ModList.get().isLoaded(SB_MOD_ID)) {
             SbCompat.registerProvider();
         }
 
-        bus.addListener(this::commonSetup);
-        MinecraftForge.EVENT_BUS.register(Events.class);
+        // 网络消息注册挪到 NeoForge 的载荷注册事件（模组总线）
+        bus.addListener(ModNetwork::register);
+        // 女仆实体的"精妙背包槽"能力注册（按注册表名找女仆，缺席时自动跳过）
+        bus.addListener(MaidCaps::register);
+        NeoForge.EVENT_BUS.register(Events.class);
         // 拾取相关的挂钩用到了车万女仆自己的事件类，没装女仆模组时不能注册
         if (ModList.get().isLoaded(TLM_MOD_ID)) {
-            MinecraftForge.EVENT_BUS.register(PickupEvents.class);
+            NeoForge.EVENT_BUS.register(PickupEvents.class);
         }
-    }
-
-    private void commonSetup(FMLCommonSetupEvent event) {
-        event.enqueueWork(() -> {
-            // 自定义进度触发器："这就很妙"（第一个背包）与"我什么都不缺了"（三个槽全满）
-            CriteriaTriggers.register(FirstMaidBackpackTrigger.INSTANCE);
-            CriteriaTriggers.register(AllMaidBackpacksTrigger.INSTANCE);
-            ModNetwork.register();
-        });
     }
 
     /**

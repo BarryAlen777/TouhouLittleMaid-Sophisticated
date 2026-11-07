@@ -3,6 +3,7 @@ package dev.barryalen.maidsophisticated;
 import dev.barryalen.maidsophisticated.advancement.AllMaidBackpacksTrigger;
 import dev.barryalen.maidsophisticated.advancement.FirstMaidBackpackTrigger;
 
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
@@ -19,33 +20,37 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
-import net.minecraftforge.common.capabilities.ICapabilityProvider;
-import net.minecraftforge.common.util.LazyOptional;
-import net.minecraftforge.event.AttachCapabilitiesEvent;
-import net.minecraftforge.eventbus.api.EventPriority;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.event.entity.EntityJoinLevelEvent;
-import net.minecraftforge.event.entity.EntityLeaveLevelEvent;
-import net.minecraftforge.event.entity.living.LivingDropsEvent;
-import net.minecraftforge.event.entity.player.PlayerInteractEvent;
-import net.minecraftforge.event.server.ServerStoppingEvent;
-import net.minecraftforge.registries.ForgeRegistries;
+import net.neoforged.bus.api.EventPriority;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDropsEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+import net.neoforged.neoforge.event.level.LevelEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.WeakHashMap;
 
 /** 全部游戏事件挂接：装备、面板、智能存取、持久化、掉落。 */
 public final class Events {
-    /** 正在跟踪的女仆（弱引用，服务器侧扫描用）。 */
+    /**
+     * 正在跟踪的女仆（服务器侧扫描用）。
+     *
+     * <p>用身份表而不是 {@code WeakHashMap}：1.21.1 的 {@code Entity#equals/hashCode}
+     * 比的是实体 id，单机里客户端同 id 的女仆会被当成"同一个键"——客户端区块卸载时
+     * 的那次 remove 会把服务端这只女仆从跟踪集里删掉，定时快照 / 关服保存就漏了她。
+     * 现在只由服务端增删，键按对象身份比；关服与卸载维度时清空（强引用要自己收）。</p>
+     */
     private static final Set<LivingEntity> TRACKED_MAIDS =
-            Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<LivingEntity, Boolean>()));
+            Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<LivingEntity, Boolean>()));
 
     private static int tickCounter = 0;
     /** 快照刷新轮换的批数：15 批 × 40 tick = 600 tick（30 秒）存一圈。 */
@@ -82,7 +87,7 @@ public final class Events {
         if (!(entity instanceof Mob)) {
             return false;
         }
-        ResourceLocation key = ForgeRegistries.ENTITY_TYPES.getKey(entity.getType());
+        ResourceLocation key = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
         if (key == null || !key.getNamespace().equals(MaidSophisticated.TLM_MOD_ID)) {
             return false;
         }
@@ -100,31 +105,21 @@ public final class Events {
         return true;
     }
 
-    // ---------- capability 挂接与生命周期 ----------
+    // ---------- 能力与生命周期 ----------
+    // NeoForge 1.21.1 起能力由注册表提供（见 MaidCaps#register），
+    // 旧的 AttachCapabilitiesEvent 手工挂接整段删除。
 
-@SubscribeEvent
-        public static void onAttachCapabilities(AttachCapabilitiesEvent<Entity> event) {
-        if (!(event.getObject() instanceof LivingEntity living) || !isMaid(living)) {
-            return;
-        }
-        MaidBackpackData data = new MaidBackpackData(living);
-        LazyOptional<MaidBackpackData> optional = LazyOptional.of(() -> data);
-        event.addCapability(new ResourceLocation(MaidSophisticated.MOD_ID, "maid_backpack"), new ICapabilityProvider() {
-            @Nonnull
-            @Override
-            public <T> LazyOptional<T> getCapability(@Nonnull net.minecraftforge.common.capabilities.Capability<T> cap,
-                                                     @Nullable net.minecraft.core.Direction side) {
-                return MaidCaps.MAID_BACKPACK.orEmpty(cap, optional);
-            }
-        });
-    }
-
-@SubscribeEvent
-        public static void onEntityJoin(EntityJoinLevelEvent event) {
+    @SubscribeEvent
+    public static void onEntityJoin(EntityJoinLevelEvent event) {
         if (!isMaid(event.getEntity())) {
             return;
         }
-        ClientMaidIndex.track(event.getEntity());
+        // UUID → 实体 id 的索引只在客户端有意义（客户端解析界面上下文用），
+        // 服务端实体别往里塞：两边 id 相同，混在一起只会给排查添乱。
+        if (event.getLevel().isClientSide()) {
+            ClientMaidIndex.track(event.getEntity());
+            return;
+        }
         if (!(event.getLevel() instanceof ServerLevel serverLevel)) {
             return;
         }
@@ -146,7 +141,7 @@ public final class Events {
 
     /** 玩家开始追踪女仆时补发背包数据：后靠近的玩家也能立刻看到背上的背包。 */
     @SubscribeEvent
-    public static void onStartTracking(net.minecraftforge.event.entity.player.PlayerEvent.StartTracking event) {
+    public static void onStartTracking(PlayerEvent.StartTracking event) {
         if (event.getEntity().level().isClientSide || !(event.getEntity() instanceof ServerPlayer player)) {
             return;
         }
@@ -155,12 +150,18 @@ public final class Events {
         }
     }
 
-@SubscribeEvent
-        public static void onEntityLeave(EntityLeaveLevelEvent event) {
+    @SubscribeEvent
+    public static void onEntityLeave(EntityLeaveLevelEvent event) {
         if (!isMaid(event.getEntity())) {
             return;
         }
-        if (event.getLevel() instanceof ServerLevel level && event.getEntity() instanceof LivingEntity living) {
+        Entity leaving = event.getEntity();
+        if (event.getLevel().isClientSide()) {
+            // 客户端那份实体离场：只清客户端的索引与外观缓存。
+            // 千万别顺手去动服务端的跟踪集 / 能力缓存——单机里两边实体 id 相同。
+            ClientMaidIndex.untrack(leaving);
+            MaidBackpackView.clear(leaving.getId());
+        } else if (event.getLevel() instanceof ServerLevel level && leaving instanceof LivingEntity living) {
             MaidBackpackData.of(living).ifPresent(data -> {
                 // 死亡兜底：正常死亡时 onLivingDrops 已经把包清空了（数据走掉落物）。
                 // 走到这里还"非空 + 已移除 + 原因是死亡"，说明掉落事件根本没发生
@@ -193,30 +194,47 @@ public final class Events {
                     data.saveToEntity();
                 }
             });
+            TRACKED_MAIDS.remove(leaving);
         }
-        TRACKED_MAIDS.remove(event.getEntity());
-        ClientMaidIndex.untrack(event.getEntity());
-        MaidBackpackView.clear(event.getEntity().getId());
+        // 女仆实例彻底离场：能力实例缓存也清掉（防同一对象被别处误复用）。
+        // forget 自己按实体的 side 选表，客户端离场只清客户端那份。
+        if (leaving instanceof LivingEntity living) {
+            MaidCaps.forget(living);
+        }
     }
 
     /** 退出世界 / 切维度：清掉客户端按实体 id 缓存的背包外观，免得新世界的女仆串用旧数据。 */
     @SubscribeEvent
-    public static void onLevelUnload(net.minecraftforge.event.level.LevelEvent.Unload event) {
-        if (event.getLevel().isClientSide()) {
+    public static void onLevelUnload(LevelEvent.Unload event) {
+        boolean clientSide = event.getLevel().isClientSide();
+        if (clientSide) {
             MaidBackpackView.clearAll();
+            // UUID → 实体 id 的索引也只属于当前这个客户端世界：实体 id 会在新世界重复，
+            // 旧条目留着既是内存小尾巴，也让排查时翻到的全是死数据。
+            ClientMaidIndex.clear();
+        } else {
+            // 服务端维度卸载：把这张维度里的女仆从跟踪集摘掉（实体离场事件不一定齐全，
+            // 而这张表现在是强引用身份表，漏一只就多留一只的整份数据）
+            synchronized (TRACKED_MAIDS) {
+                TRACKED_MAIDS.removeIf(maid -> maid.level() == null
+                        || maid.level() == event.getLevel() || maid.isRemoved());
+            }
         }
-        // 精妙背包的护栏缓存按背包物品堆存（值是背包包装，会强引用实体数据）：
-        // 换世界不清，上一局的背包包装要等到被 LRU 淘汰才松手。
-        if (MaidSophisticated.sophisticatedBackpacksLoaded()) {
-            SbCompat.clearShieldCache();
-        }
+        // 能力实例缓存：只清"正在卸载的这个维度"里的女仆，不整表清。
+        // 单机切维度时客户端的 Unload 不能把服务端那份一起清了；多人服里卸载 A 维度
+        // 也不该把 B 维度里正在开着原生界面的玩家踢掉。数据都是即时写回实体持久数据的，
+        // 清掉不丢东西，下次查询会从实体上原样重建。
+        MaidCaps.clearLevel(event.getLevel());
+        // 精妙背包护栏缓存（SbCompat）这里刻意不清：它按背包物品堆的身份做键，
+        // 两侧各存各的、且是带容量上限的 LRU，本来就不会互相覆盖；而任何一侧的清理
+        // 都会把服务端的背包包装整批作废，正在开着的原生界面下一 tick 自查到"包装换了"
+        // 就会把界面踢掉。这些缓存只在关服 / 退世界时统一清。
     }
 
     /**
      * 取一份"当前跟踪的女仆"快照。
      *
-     * TRACKED_MAIDS 底层是 WeakHashMap：GC 随时可能回收键，直接边遍历边被 GC 清项
-     * 就是 CME 的经典现场；synchronizedSet 也只是让单个方法原子，遍历仍需自己上锁。
+     * TRACKED_MAIDS 是同步集合：单个方法原子，但遍历还得自己上锁（别的线程可能在增删），
      * 所以统一在锁内拷贝一份，遍历走快照。
      */
     private static List<LivingEntity> trackedMaidsSnapshot() {
@@ -306,7 +324,7 @@ public final class Events {
      * 再配合下面的定时刷新和 {@link #onServerStopping} 就不会丢数据。
      */
     @SubscribeEvent
-    public static void onLevelSave(net.minecraftforge.event.level.LevelEvent.Save event) {
+    public static void onLevelSave(LevelEvent.Save event) {
         if (!(event.getLevel() instanceof ServerLevel level)) {
             return;
         }
@@ -330,21 +348,24 @@ public final class Events {
         synchronized (TRACKED_MAIDS) {
             TRACKED_MAIDS.clear();
         }
-        // 同理清掉精妙背包那层护栏缓存里的背包包装
+        // 同理：MaidCaps 的缓存值强引用实体，关服不清的话，反复进出存档会一局一局往上叠。
+        // 只清服务端那份：客户端那份由客户端自己的世界卸载 / 退出去清。
+        MaidCaps.clear(false);
+        // 精妙背包那层护栏缓存里的背包包装也在关服时统一清（见 onLevelUnload 的说明：换维度不清）
         if (MaidSophisticated.sophisticatedBackpacksLoaded()) {
-            SbCompat.clearShieldCache();
+            SbCompat.clearCaches();
         }
     }
 
     /** 女仆死亡：背包从独立槽里掉出来，内容物跟着背包物品本身走，不会丢。 */
-@SubscribeEvent(priority = EventPriority.LOWEST)
-        public static void onLivingDrops(LivingDropsEvent event) {
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void onLivingDrops(LivingDropsEvent event) {
         LivingEntity entity = event.getEntity();
         if (entity.level().isClientSide || !isMaid(entity)) {
             return;
         }
         // 别的模组取消了掉落（墓碑 / 收尸袋 / 保留物品之类）：它只会搬走 event.getDrops() 里的东西，
-        // 而我们挂在实体 PersistentData 上的背包根本不在那个列表里，随实体一起消失就等于背包没了。
+        // 而我们挂在实体持久数据上的背包根本不在那个列表里，随实体一起消失就等于背包没了。
         // 所以这里自己把背包掉在地上，但不放进 event.getDrops()，避免和墓碑里的东西重复。
         if (event.isCanceled()) {
             MaidBackpackData.of(entity).ifPresent(data -> {
@@ -383,8 +404,8 @@ public final class Events {
      * 背包扣这一支在客户端也要拦：女仆模组的交互是"客户端预测 + 服务端补包"两条腿，
      * 只拦服务端的话，客户端本地那半套换背包预测照样会跑一遍，把她的客户端背包类型改脏。
      */
-@SubscribeEvent(priority = EventPriority.HIGHEST)
-        public static void onEntityInteractSpecific(PlayerInteractEvent.EntityInteractSpecific event) {
+    @SubscribeEvent(priority = EventPriority.HIGHEST)
+    public static void onEntityInteractSpecific(PlayerInteractEvent.EntityInteractSpecific event) {
         if (!isMaid(event.getTarget())) {
             return;
         }
@@ -488,7 +509,7 @@ public final class Events {
 
     // ---------- 智能存取 ----------
 
-    // 注：Forge 1.20.1 没有生物拾取物品事件（EntityPickupItemEvent 已移除），
+    // 注：原版没有生物拾取物品事件（EntityPickupItemEvent 已移除），
     // "拾取先入背包"由下面的服务器扫描实现：女仆附近掉落物优先入包。
 
     /**
@@ -500,11 +521,8 @@ public final class Events {
      *
      * 三种活都没轮到的 tick 直接返回，不再每 tick 遍历女仆表。
      */
-@SubscribeEvent
-        public static void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END) {
-            return;
-        }
+    @SubscribeEvent
+    public static void onServerTick(ServerTickEvent.Post event) {
         tickCounter++;
         boolean pickupPass = tickCounter % 10 == 0;
         boolean refillPass = tickCounter % 40 == 13;
@@ -563,9 +581,9 @@ public final class Events {
      * 3. 最后才进精妙背包，按槽位顺序一个个塞。
      */
     private static void pickupNearbyItems(ServerLevel level, LivingEntity maid, MaidBackpackData data) {
-        List<net.minecraft.world.entity.Entity> items = level.getEntities(maid, maid.getBoundingBox().inflate(2.2),
+        List<Entity> items = level.getEntities(maid, maid.getBoundingBox().inflate(2.2),
                 e -> e instanceof ItemEntity item && !item.isRemoved() && !item.hasPickUpDelay());
-        for (net.minecraft.world.entity.Entity entity : items) {
+        for (Entity entity : items) {
             if (!(entity instanceof ItemEntity itemEntity) || itemEntity.isRemoved()) {
                 continue;
             }
@@ -585,7 +603,7 @@ public final class Events {
                 }
                 remaining = SbCompat.insertIntoBackpack(backpack, remaining);
             }
-            if (ItemStack.matches(before, remaining)) {
+            if (ItemStack.isSameItemSameComponents(before, remaining)) {
                 continue;
             }
             int taken = before.getCount() - remaining.getCount();
@@ -661,7 +679,7 @@ public final class Events {
     }
 
     /** 首次给女仆背上精妙背包 → 弹成就"这就很妙"（原版语义：每个玩家只弹一次，重装不会再弹）。 */
-    public static void creditFirstBackpack(@Nullable net.minecraft.world.entity.Entity actor) {
+    public static void creditFirstBackpack(@Nullable Entity actor) {
         if (actor instanceof ServerPlayer player && MaidSophisticated.sophisticatedBackpacksLoaded()) {
             FirstMaidBackpackTrigger.INSTANCE.trigger(player);
         }
@@ -676,8 +694,7 @@ public final class Events {
      * @param actor 这次放包的人（服务端玩家）；不是玩家（比如自动化模组）就不发
      * @param data  被放包的那只女仆的背包数据
      */
-    public static void creditAllBackpacks(@Nullable net.minecraft.world.entity.Entity actor,
-                                          @Nullable MaidBackpackData data) {
+    public static void creditAllBackpacks(@Nullable Entity actor, @Nullable MaidBackpackData data) {
         if (!(actor instanceof ServerPlayer player) || data == null
                 || !MaidSophisticated.sophisticatedBackpacksLoaded()) {
             return;

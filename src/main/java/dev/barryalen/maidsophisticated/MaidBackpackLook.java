@@ -23,8 +23,20 @@ public final class MaidBackpackLook {
 
     private MaidBackpackLook() {}
 
+    /**
+     * 这张表只给客户端的渲染期换类型用。1.21.1 的 {@code Entity#equals/hashCode}
+     * 比的是实体 id，单机里服务端同 id 的女仆会被算成"有记录"的那一只——要是服务端也来读，
+     * 就会读到客户端渲染临时换出来的类型。所以非客户端一律按"没记录"处理。
+     */
+    private static boolean isClientSide(EntityMaid maid) {
+        return maid.level() != null && maid.level().isClientSide;
+    }
+
     /** 记下她原本的背包类型（已经在用自己的背包类型时才算记录，重复调用不会覆盖）。 */
     public static void record(EntityMaid maid, IMaidBackpack original) {
+        if (!isClientSide(maid)) {
+            return;
+        }
         int id = maid.getId();
         if (ORIGINAL.containsKey(id)) {
             MAIDS.put(id, new WeakReference<>(maid));
@@ -36,12 +48,18 @@ public final class MaidBackpackLook {
 
     /** 这个女仆真正的背包类型：有记录就用记录，没有就用实体自己身上的。 */
     public static IMaidBackpack trueType(EntityMaid maid) {
+        if (!isClientSide(maid)) {
+            return maid.getMaidBackpackType();
+        }
         IMaidBackpack recorded = ORIGINAL.get(maid.getId());
         return recorded != null ? recorded : maid.getMaidBackpackType();
     }
 
     /** 把某个女仆的类型换回她自己的。 */
     public static void restore(EntityMaid maid) {
+        if (!isClientSide(maid)) {
+            return;
+        }
         IMaidBackpack original = ORIGINAL.remove(maid.getId());
         MAIDS.remove(maid.getId());
         if (original != null && maid.isAlive()) {
@@ -58,7 +76,7 @@ public final class MaidBackpackLook {
             WeakReference<EntityMaid> ref = MAIDS.get(id);
             EntityMaid maid = ref == null ? null : ref.get();
             IMaidBackpack original = ORIGINAL.get(id);
-            if (maid != null && original != null && maid.isAlive()) {
+            if (maid != null && original != null && maid.isAlive() && isClientSide(maid)) {
                 maid.setMaidBackpackType(original);
             }
             ORIGINAL.remove(id);

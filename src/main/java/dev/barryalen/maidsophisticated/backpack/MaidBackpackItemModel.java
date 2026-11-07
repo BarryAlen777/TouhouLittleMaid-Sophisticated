@@ -9,8 +9,8 @@ import dev.barryalen.maidsophisticated.client.SophBackpackRender;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.model.EntityModel;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.api.distmarker.OnlyIn;
 
 /**
  * 车万女仆背包层使用的“模型”：由 TLM 的原版背包层在它自己的挂点/姿势上调用，
@@ -27,7 +27,7 @@ public class MaidBackpackItemModel extends EntityModel<EntityMaid> {
 
     @Override
     public void renderToBuffer(PoseStack poseStack, VertexConsumer vertexConsumer, int packedLight,
-                               int packedOverlay, float red, float green, float blue, float alpha) {
+                               int packedOverlay, int color) {
         EntityMaid maid = MaidBackpackRenderer.currentMaid();
         if (maid == null) {
             return;

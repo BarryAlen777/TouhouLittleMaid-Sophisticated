@@ -4,8 +4,8 @@ import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import com.github.tartaricacid.touhoulittlemaid.inventory.handler.MaidInvWrapper;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.items.IItemHandlerModifiable;
-import net.minecraftforge.items.wrapper.CombinedInvWrapper;
+import net.neoforged.neoforge.items.IItemHandlerModifiable;
+import net.neoforged.neoforge.items.wrapper.CombinedInvWrapper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -117,6 +117,13 @@ public final class MaidBackpackInv {
         if (maid == null) {
             return;
         }
+        // 客户端那份背包数据是同步下来的副本，这张缓存只在服务端被读（补丁只在服务端接）。
+        // 更要紧的是：1.21.1 的 Entity#equals/hashCode 比的是实体 id，单机里客户端同 id
+        // 的女仆会 equals 到服务端那只——客户端收一次同步包就会把服务端的缓存删掉，
+        // 女仆 AI 下一 tick 只能重建包装，正在开的原生界面也会因此对不上。直接不接客户端。
+        if (maid.level() != null && maid.level().isClientSide) {
+            return;
+        }
         try {
             synchronized (CACHE) {
                 CACHE.remove(maid);
@@ -136,6 +143,11 @@ public final class MaidBackpackInv {
      */
     public static IItemHandlerModifiable of(EntityMaid maid) {
         if (maid == null || !MaidSophisticated.sophisticatedBackpacksLoaded()) {
+            return null;
+        }
+        // 这张缓存只在服务端用；客户端进来按实体 id 会命中服务端那条（见 invalidate 的说明），
+        // 直接给空，客户端本来也不需要"拼起来的物品栏"。
+        if (maid.level() != null && maid.level().isClientSide) {
             return null;
         }
         try {

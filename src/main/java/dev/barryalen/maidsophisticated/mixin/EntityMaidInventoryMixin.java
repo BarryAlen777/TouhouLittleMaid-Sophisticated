@@ -2,14 +2,14 @@ package dev.barryalen.maidsophisticated.mixin;
 
 import com.github.tartaricacid.touhoulittlemaid.entity.passive.EntityMaid;
 import dev.barryalen.maidsophisticated.MaidBackpackInv;
-import net.minecraftforge.items.wrapper.CombinedInvWrapper;
+import net.neoforged.neoforge.items.wrapper.CombinedInvWrapper;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
- * 把精妙背包并进车万女仆的"可用物品栏"（1.20.1 车万女仆 1.5.3 实测）。
+ * 把精妙背包并进车万女仆的"可用物品栏"（1.21.1 车万女仆 1.5.3 实测）。
  *
  * <p>补的是两个方法，都是车万女仆自己对外暴露、所有 AI 与附属模组共用的入口：</p>
  * <ul>
@@ -27,7 +27,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(value = EntityMaid.class, remap = false)
 public abstract class EntityMaidInventoryMixin {
 
-    @Inject(method = "getAvailableInv(Z)Lnet/minecraftforge/items/wrapper/CombinedInvWrapper;",
+    @Inject(method = "getAvailableInv(Z)Lnet/neoforged/neoforge/items/wrapper/CombinedInvWrapper;",
             at = @At("RETURN"), cancellable = true, require = 0)
     private void maidSophisticated$appendBackpacks(boolean includeHands,
                                                    CallbackInfoReturnable<CombinedInvWrapper> cir) {
@@ -41,7 +41,7 @@ public abstract class EntityMaidInventoryMixin {
         }
     }
 
-    @Inject(method = "getAvailableBackpackInv()Lnet/minecraftforge/items/wrapper/CombinedInvWrapper;",
+    @Inject(method = "getAvailableBackpackInv()Lnet/neoforged/neoforge/items/wrapper/CombinedInvWrapper;",
             at = @At("RETURN"), cancellable = true, require = 0)
     private void maidSophisticated$appendBackpacksOnly(CallbackInfoReturnable<CombinedInvWrapper> cir) {
         EntityMaid self = (EntityMaid) (Object) this;

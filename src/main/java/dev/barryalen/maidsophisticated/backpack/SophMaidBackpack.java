@@ -15,9 +15,8 @@ import net.minecraft.world.MenuProvider;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
-import net.minecraftforge.api.distmarker.Dist;
-import net.minecraftforge.api.distmarker.OnlyIn;
-import net.minecraftforge.registries.ForgeRegistries;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.api.distmarker.OnlyIn;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -59,7 +58,7 @@ public final class SophMaidBackpack extends IMaidBackpack {
     /** 按物品注册名挑对应档位；认不出来就按布包算。 */
     public static SophMaidBackpack forStack(ItemStack stack) {
         if (!stack.isEmpty()) {
-            ResourceLocation key = ForgeRegistries.ITEMS.getKey(stack.getItem());
+            ResourceLocation key = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem());
             if (key != null) {
                 SophMaidBackpack backpack = BY_ITEM_PATH.get(key.getPath());
                 if (backpack != null) {
@@ -79,8 +78,8 @@ public final class SophMaidBackpack extends IMaidBackpack {
     private final String itemPath;
 
     private SophMaidBackpack(String tier, String itemPath) {
-        this.id = new ResourceLocation(MaidSophisticated.MOD_ID, "sophisticated_backpack_" + tier);
-        this.texture = new ResourceLocation(MaidSophisticated.MOD_ID,
+        this.id = ResourceLocation.fromNamespaceAndPath(MaidSophisticated.MOD_ID, "sophisticated_backpack_" + tier);
+        this.texture = ResourceLocation.fromNamespaceAndPath(MaidSophisticated.MOD_ID,
                 "textures/entity/backpack/" + tier + ".png");
         this.itemPath = itemPath;
     }
